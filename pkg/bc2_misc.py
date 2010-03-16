@@ -73,3 +73,6 @@ def _decode_words(size, data):
 
     return words
 
+def _encode_resp(sequence, words):
+	return _encode_pkt(False, True, sequence, words)
+

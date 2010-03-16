@@ -6,8 +6,15 @@ import socket
 
 import bc2_misc
 
+def bc2_connect(host, port, pw):
+    ss = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ss.connect(host, port)
+
+
+
+
 class CommandConnection():
-    '''Objects of this type maintain a connection to a BC2 server'''
+    '''Objects of this type maintain a command connection to a BC2 server'''
     def __init__(self, host, port, pw):
         self.host = host
         self.port = port
@@ -27,7 +34,7 @@ class CommandConnection():
         #open socket
         self.serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.serversocket.connect((host, port))
-        self.serversocket.setblocking(1)
+        #self.serversocket.setblocking(1)
 
         #authentication
         self._auth()
@@ -81,17 +88,36 @@ class CommandConnection():
         if words[0] != "OK":
             raise ValueError("Incorrect password")
 
+    def receive_events(self):
+        events_req, self.client_seq = bc2_misc._encode_req(["eventsEnabled", "true"], self.client_seq)
+        self.serversocket.send(events_req)
+        events_resp = self.serversocket.recv(4096)
 
+        [is_from_server, is_response, sequence, words] = bc2_misc._decode_pkt(events_resp)
 
-#class EventConnection():
+        while True:
+            # Wait for packet from server
+            print "getting packet"
+            packet = self.serversocket.recv(4096)
+            print "decoding packet"
+            [is_from_server, is_response, sequence, words] = bc2_misc._decode_pkt(packet)
+            # If this was a command from the server, we should respond to it
+            # For now, we always respond with an "OK"
+            if not is_response:
+                response = bc2_misc._encode_resp(sequence, ["OK"])
+                self.serversocket.send(response)
+            else:
+                pass
+            print "---"
+            print packet
 
 
 
 if __name__ == '__main__':
     host = "75.102.38.3"
     port = 48888
-    #f = open(os.path.join("..", "..", "bc2_info.pw"),"r")
-    #pw = f.read().strip()
-    pw = "password"
+    f = open(os.path.join("..", "..", "bc2_info.pw"),"r")
+    pw = f.read().strip()
 
     conx = CommandConnection(host, port, pw)
+    conx.receive_events()
