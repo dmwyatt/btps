@@ -2,15 +2,10 @@ import hashlib
 import os
 import shlex
 from struct import *
-import socket
 
 import bc2_misc
-
-def bc2_connect(host, port, pw):
-    ss = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    ss.connect(host, port)
-
-
+import eventlet
+from eventlet.green import socket
 
 
 class CommandConnection():
