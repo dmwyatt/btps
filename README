@@ -1,3 +1,11 @@
 btps is designed to allow easy administration of Battlefield: Bad Company 2 servers.
 
-Currently in an unusable state except for DICE's rudimentry console apps.
+List admins names in config/admins.
+Store password in config/password.
+
+
+
+Current functioning commands
+!commandname <optional argument>
+-----------------------------------
+!serveryell <duration_in_seconds> "message in quotes"

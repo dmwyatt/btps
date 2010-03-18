@@ -94,10 +94,10 @@ def serveryell(words):
     else:
         msg = ' '.join(words[2:])
 
-
-    #cmd = 'admin.yell testtesttest 4000 all'
     cmd = 'admin.yell "%s" %s all' % (msg, seconds*1000)
     print "COMMAND_Q: %s" % cmd
+
+    #insert command into command queue
     command_q.put(cmd)
 
 def command_processor():
@@ -121,11 +121,12 @@ if __name__ == '__main__':
 
     host = "75.102.38.3"
     port = 48888
-    f = open(os.path.join("..", "bc2_info.pw"),"r")
-    pw = f.read().strip()
+    #f = open(os.path.join("..", "bc2_info.pw"),"r")
+    #pw = f.read().strip()
+    pw = open("config/password").read().strip()
 
     admins = open("config/admins").read().split("\n")
-    print admins
+    print "ADMINS: %s" % admins
     cmds = {"!serveryell": serveryell}
 
     event_socket = _server_connect(host, port)
