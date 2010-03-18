@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import hashlib
-import shlex
 from struct import *
 
 def _hash_pw(salt, password):
@@ -19,13 +18,14 @@ def _encode_pkt(is_from_server, is_response, sequence, words):
     enc_word_count = _encode_int32(len(words))
     [words_size, enc_words] = _encode_words(words)
     enc_size = _encode_int32(words_size + 12)
-
+    #print "OUT>>> ", _decode_pkt(enc_header + enc_size + enc_word_count + enc_words)
     return enc_header + enc_size + enc_word_count + enc_words
 
 def _decode_pkt(data):
     [isFromServer, isResponse, sequence] = _decode_header(data)
     words_size = _decode_int32(data[4:8]) - 12
     words = _decode_words(words_size, data[12:])
+    #print "IN>>>", isFromServer, isResponse, sequence, words
     return [isFromServer, isResponse, sequence, words]
 
 def _encode_header(is_from_server, is_response, sequence):
@@ -75,4 +75,3 @@ def _decode_words(size, data):
 
 def _encode_resp(sequence, words):
 	return _encode_pkt(False, True, sequence, words)
-
