@@ -4,7 +4,7 @@ import os
 import shlex
 from struct import *
 
-import bc2_misc
+from pkg import bc2_misc
 import eventlet
 from eventlet.green import socket
 from eventlet.green import time
@@ -121,7 +121,7 @@ if __name__ == '__main__':
 
     host = "75.102.38.3"
     port = 48888
-    f = open(os.path.join("..", "..", "bc2_info.pw"),"r")
+    f = open(os.path.join("..", "bc2_info.pw"),"r")
     pw = f.read().strip()
 
     admins = ['Therms', 'Fatb']
