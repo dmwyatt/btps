@@ -83,7 +83,7 @@ def sleepy():
 def serveryell(words):
     global command_q
     try:
-        seconds = int(words[1])/1000
+        seconds = int(words[1])
         no_duration = False
     except:
         seconds = 4
@@ -124,7 +124,8 @@ if __name__ == '__main__':
     f = open(os.path.join("..", "bc2_info.pw"),"r")
     pw = f.read().strip()
 
-    admins = ['Therms', 'Fatb']
+    admins = open("config/admins").read().split("\n")
+    print admins
     cmds = {"!serveryell": serveryell}
 
     event_socket = _server_connect(host, port)
