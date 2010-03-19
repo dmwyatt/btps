@@ -1,12 +1,14 @@
 btps is designed to allow easy administration of Battlefield: Bad Company 2 servers.
 
+Commands which accept a player name do automatic name filtering.  This means that you can just type a partial name, and if it's unique it will match.
+
+Config
+-----------------------------------
 List admins names in config/admins.
-Store password in config/password.
-
-
+Store rcon password in config/password.
 
 Current functioning commands
 !commandname <optional argument>
 -----------------------------------
 !serveryell <duration_in_seconds> "message in quotes"
-!playeryell <duration_in_seconds> "caps optional, full or partial player name" "message"
+!playeryell <duration_in_seconds> "playername" "message"
