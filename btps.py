@@ -80,7 +80,7 @@ def sleepy():
     time.sleep(100)
     print 'got a packet and slept'
 
-def serveryell(words):
+def serveryell(admin, words, skt):
     global command_q
     try:
         seconds = int(words[1])
@@ -99,6 +99,89 @@ def serveryell(words):
 
     #insert command into command queue
     command_q.put(cmd)
+
+def playeryell(admin, words, skt):
+    ''' PLAYERYELL WORDS
+        ['!playeryell', '2', 'therms', "what's going on homie"]
+        SPAWNING PLAYER GETTER
+        APPENDING Therms TO MATCHES
+        COMMAND_Q: admin.yell "what's going on homie" 2000 player Therms
+
+        PLAYERYELL WORDS
+        ['!playeryell', 'therms', 'testy westy']
+        SPAWNING PLAYER GETTER
+        APPENDING Therms TO MATCHES
+        COMMAND_Q: admin.yell "testy westy" 4000 player Therms
+
+    '''
+    global command_q
+    print "PLAYERYELL WORDS"
+    print words
+    try:
+        seconds = int(words[1])
+        no_duration = False
+    except:
+        seconds = 4
+        no_duration = True
+
+    if no_duration:
+        player = words[1]
+        msg = words[2]
+    else:
+        player = words[2]
+        msg = words[3]
+
+    player_name = select_player(player, get_players(skt), admin, skt)
+
+    if player_name == 1:
+        return
+    elif player_name == 2:
+        return
+    else:
+        cmd = 'admin.yell "%s" %s player %s' % (msg, seconds*1000, player_name)
+        print "COMMAND_Q: %s" % cmd
+
+        #insert command into command queue
+        command_q.put(cmd)
+
+def get_players(skt):
+    global action_pool
+    #sample=['OK', '[CIA]', 'Therms', '24', '1', '', 'cer566', '24', '2']
+    cmd = "admin.listPlayers all"
+    print "SPAWNING PLAYER GETTER"
+    players_getter = action_pool.spawn(send_command, skt, cmd)
+    players = players_getter.wait()
+    field_count = 0
+    players_l = []
+    p =[]
+    for player in players[1:]:
+        p.append(player)
+        field_count += 1
+        if field_count == 4:
+                field_count = 0
+                players_l.append(tuple(p))
+                p = []
+
+    players = [x[1] for x in players_l]
+    return players
+
+def select_player(player, players, admin, skt):
+    matches = []
+    for p in players:
+        if player.lower() in p.lower():
+            print "APPENDING %s TO MATCHES" % p
+            matches.append(p)
+
+    if len(matches) > 1:
+        #Not specific enough
+        playeryell(admin, ['!playeryell', admin, 'ADMIN: Be more specific with playername.'], skt)
+        return 1
+    elif len(matches) == 0:
+        #No matches
+        playeryell(admin, ['!playeryell', admin, 'ADMIN: No matching playername.'], skt)
+        return 2
+    else:
+        return matches[0]
 
 def command_processor():
     global command_socket
@@ -127,7 +210,8 @@ if __name__ == '__main__':
 
     admins = open("config/admins").read().split("\n")
     print "ADMINS: %s" % admins
-    cmds = {"!serveryell": serveryell}
+    cmds = {"!serveryell": serveryell,
+            "!playeryell": playeryell}
 
     event_socket = _server_connect(host, port)
     _auth(event_socket, pw)
@@ -166,7 +250,8 @@ if __name__ == '__main__':
                 chat_words = shlex.split(words[2])
             except:
                 continue
-            print "CHAT WORDS: %s" % chat_words
+
+            talker = words[1]
             potential_cmd = chat_words[0].lower()
             if potential_cmd in cmds:
-                cmds[potential_cmd](chat_words)
+                cmds[potential_cmd](talker, chat_words, event_socket)
