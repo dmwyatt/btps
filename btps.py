@@ -49,11 +49,13 @@ def _auth(skt, pw):
     return skt
 
 def send_command(skt, cmd):
-    global client_seq_number
-    #print "send_command pre CLIENT_SEQ: %i" % client_seq_number
+    ''' Send cmd over skt.
+    '''
+    global client_seq_number #maintain seqence numbers
+
     words = shlex.split(cmd)
     request, client_seq_number = bc2_misc._encode_req(words, client_seq_number)
-    #print "send_command post CLIENT_SEQ: %i" % client_seq_number
+
     skt.send(request)
 
     # Wait for response from server
@@ -63,63 +65,64 @@ def send_command(skt, cmd):
     if not is_response:
         print 'Received an unexpected request packet from server, ignored:'
 
-    #print cmd, words
-
     return words
-
-def prep_admin_command(cmd):
-    global client_seq_number
-    words = shlex.split(cmd)
-    request, client_seq_number = bc2_misc._encode_req(words, client_seq_number)
-    return request
 
 def _set_receive_events(skt):
     send_command(skt, "eventsEnabled true")
 
-def sleepy():
-    time.sleep(100)
-    print 'got a packet and slept'
-
 def serveryell(admin, words, skt):
+    ''' Command action.
+        Words should be a list formatted like:
+            duration included:
+                ["!serveryell", seconds, "message"]
+            duration not included:
+                ["!serveryell", "message"]
+
+        If duration isn't included we default to 4 seconds.
+    '''
+
     global command_q
+
+    #check for included duration
     try:
         seconds = int(words[1])
         no_duration = False
+
+    #no duration.  Default to 4 seconds.
     except:
         seconds = 4
         no_duration = True
 
+    #Get message to send from words
     if no_duration:
-        msg = ' '.join(words[1:])
+        msg = words[1]
     else:
-        msg = ' '.join(words[2:])
+        msg = words[2]
 
+    #Build command.  Duration is in ms
     cmd = 'admin.yell "%s" %s all' % (msg, seconds*1000)
-    print "COMMAND_Q: %s" % cmd
 
     #insert command into command queue
     command_q.put(cmd)
 
 def playeryell(admin, words, skt):
-    ''' PLAYERYELL WORDS
-        ['!playeryell', '2', 'therms', "what's going on homie"]
-        SPAWNING PLAYER GETTER
-        APPENDING Therms TO MATCHES
-        COMMAND_Q: admin.yell "what's going on homie" 2000 player Therms
+    ''' Command action.
+        Words should be a list formatted like:
+            duration included:
+                ["!playeryell", seconds, "playername", "message"]
+            duration not included:
+                ["!playeryell", "playername", "message"]
 
-        PLAYERYELL WORDS
-        ['!playeryell', 'therms', 'testy westy']
-        SPAWNING PLAYER GETTER
-        APPENDING Therms TO MATCHES
-        COMMAND_Q: admin.yell "testy westy" 4000 player Therms
-
+        If duration isn't included we default to 4 seconds.
     '''
     global command_q
-    print "PLAYERYELL WORDS"
-    print words
+
+    #check for included duration
     try:
         seconds = int(words[1])
         no_duration = False
+
+    #no duration.  Default to 4 seconds.
     except:
         seconds = 4
         no_duration = True
@@ -131,7 +134,7 @@ def playeryell(admin, words, skt):
         player = words[2]
         msg = words[3]
 
-    player_name = select_player(player, get_players(skt), admin, skt)
+    player_name = select_player(player, get_players_names(skt), admin, skt)
 
     if player_name == 1:
         return
@@ -139,18 +142,27 @@ def playeryell(admin, words, skt):
         return
     else:
         cmd = 'admin.yell "%s" %s player %s' % (msg, seconds*1000, player_name)
-        print "COMMAND_Q: %s" % cmd
 
         #insert command into command queue
         command_q.put(cmd)
 
-def get_players(skt):
-    global action_pool
+#def get_players(skt):
+
+
+def get_players_names(skt):
+    ''' Returns a list of player names on the server.
+    '''
+    global command_q
     #sample=['OK', '[CIA]', 'Therms', '24', '1', '', 'cer566', '24', '2']
     cmd = "admin.listPlayers all"
-    print "SPAWNING PLAYER GETTER"
+
+    #spawn a green thread to retrieve the player list
     players_getter = action_pool.spawn(send_command, skt, cmd)
+
+    #get the results from the thread
     players = players_getter.wait()
+
+    #filter the list for just the names
     field_count = 0
     players_l = []
     p =[]
@@ -163,13 +175,19 @@ def get_players(skt):
                 p = []
 
     players = [x[1] for x in players_l]
+
     return players
 
 def select_player(player, players, admin, skt):
+    ''' Selects a player from a list of players.  Can use player name substrings.
+        If substring isn't unique enough, or if no matches are found, we'll
+        message the admin who initiated the command informing them of this.
+    '''
+
+    #Find player amongst players
     matches = []
     for p in players:
         if player.lower() in p.lower():
-            print "APPENDING %s TO MATCHES" % p
             matches.append(p)
 
     if len(matches) > 1:
@@ -184,14 +202,20 @@ def select_player(player, players, admin, skt):
         return matches[0]
 
 def command_processor():
+    ''' Loops waiting for commands to be in command_q and then sends them to
+        the server.
+    '''
     global command_socket
     while True:
         try:
             cmd = command_q.get()
-            #print "SENDING COMMAND: %s" % cmd
         except:
             continue
         send_command(command_socket, cmd)
+
+def log(msg):
+    dt = datetime.datetime.today().strftime("%m/%d/%y %H:%M:%S")
+    print "%s - %s" % (dt, msg)
 
 client_seq_number = 0
 
@@ -222,17 +246,13 @@ if __name__ == '__main__':
 
     action_pool.spawn_n(command_processor)
 
-    #print 'starting'
+
     while True:
-        #if command_q.qsize() > 1:
-        #    print "cmd_q size: %i" %command_q.qsize()
-        #receive packet
-        print 'receiving packet'
+        #print log("waiting for packet")
         packet = event_socket.recv(4096)
-        print 'got packet'
 
         #decode packet
-        print 'decoding packet'
+        #print log("decoding packet     ")
         _, is_response, sequence, words = bc2_misc._decode_pkt(packet)
 
         #ack packet
@@ -240,9 +260,11 @@ if __name__ == '__main__':
             response = bc2_misc._encode_resp(sequence, ["OK"])
             event_socket.send(response)
 
-        print "received pkt with words (and initiated woo): "
-        print words
-        print '-'*30
+        #print log("received pkt with words (and initiated woo): ")
+        m = "EVENT: %s PARAM: %s" % (words[0], words[1:])
+        log(m)
+        #print m
+        #print '-'*30
 
         #process event
         if words[0] == 'player.onChat' and words[1] in admins:
@@ -254,4 +276,4 @@ if __name__ == '__main__':
             talker = words[1]
             potential_cmd = chat_words[0].lower()
             if potential_cmd in cmds:
-                cmds[potential_cmd](talker, chat_words, event_socket)
+                cmds[potential_cmd](talker, chat_words, command_socket)
