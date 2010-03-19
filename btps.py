@@ -3,12 +3,19 @@ import hashlib
 import os
 import shlex
 from struct import *
+import sys
 
 from pkg import bc2_misc
 import eventlet
 from eventlet.green import socket
 from eventlet.green import time
 #import socket
+
+def import_commands():
+    commands = open(os.path.join('commands', '_commands'), 'r').read().split("\n")
+    for command in commands:
+        __import__("commands.%s" % command)
+
 
 def _server_connect(host, port):
     ''' Connects to a server and returns the socket
