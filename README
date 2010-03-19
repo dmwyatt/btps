@@ -9,3 +9,4 @@ Current functioning commands
 !commandname <optional argument>
 -----------------------------------
 !serveryell <duration_in_seconds> "message in quotes"
+!playeryell <duration_in_seconds> "caps optional, full or partial player name" "message"
