@@ -10,5 +10,7 @@ Store rcon password in config/password.
 Current functioning commands
 !commandname <optional argument>
 -----------------------------------
-!serveryell <duration_in_seconds> "message in quotes"
-!playeryell <duration_in_seconds> "playername" "message"
+!serveryell <duration_in_seconds> "message in quotes"		- Sends message to everyone on server
+!playeryell <duration_in_seconds> "playername" "message"	- Sends message to specific player
+!map														- Sends message to typer continaing mapname
+!kick														- Kicks specified player

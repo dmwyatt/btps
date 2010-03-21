@@ -83,6 +83,9 @@ def serveryell(admin, words, skt):
 
     global command_q
 
+    if admin not in admins:
+        return
+
     #check for included duration
     try:
         seconds = int(words[1])
@@ -117,6 +120,9 @@ def playeryell(admin, words, skt):
     '''
     global command_q
 
+    if admin not in admins:
+        return
+
     #check for included duration
     try:
         seconds = int(words[1])
@@ -146,13 +152,81 @@ def playeryell(admin, words, skt):
         #insert command into command queue
         command_q.put(cmd)
 
-#def get_players(skt):
+def map_(player, words, skt):
+    ''' Command action.
+        Words should be a list formatted like:
+            duration included:
+                ["!playeryell", seconds, "playername", "message"]
+            duration not included:
+                ["!playeryell", "playername", "message"]
 
-
-def get_players_names(skt):
-    ''' Returns a list of player names on the server.
+        If duration isn't included we default to 4 seconds.
     '''
+    #global command_q
+    message_duration = 8000 #ms
+    level = get_map(skt)
+
+    cmd = 'admin.yell "%s" %s player %s' % (level, message_duration, player)
+
+    command_q.put(cmd)
+
+def kick(admin, words, skt):
     global command_q
+
+    if admin not in admins:
+        return
+
+    _players = get_players_names(skt)
+
+    player_name = select_player(words[1], _players, admin, skt)
+
+    if player_name == 1:
+        return
+    elif player_name == 2:
+        return
+    else:
+        if player_name not in admins:
+            cmd = 'admin.kickPlayer %s' % player_name
+            command_q.put(cmd)
+        else:
+            playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
+
+
+
+
+def get_map(skt):
+    maps = {"mp_001": "Panama Canal (Conquest)",
+            "mp_003": "Laguna Alta (Conquest)",
+            "mp_005": "Atacama Desert (Conquest)",
+            "mp_007": "White Pass (Conquest)",
+            "mp_009cq": "Laguna Presa (Conquest)",
+            "mp_002": "Valparaiso (Rush)",
+            "mp_004": "Isla Inocentes (Rush)",
+            "mp_006": "Arica Harbor (Rush)",
+            "mp_008": "Nelson Bay (Rush)",
+            "mp_012gr": "Port Valdez (Squad Rush)",
+            "mp_001sr": "Panama Canal (Squad Rush)",
+            "mp_002sr": "Valparaiso (Squad Rush)",
+            "mp_005sr": "Atacama Desert (Squad Rush)",
+            "mp_012sr": "Port Valdez (Squad Rush)",
+            "mp_004sdm": "Isla Inocentes (Squad Deathmatch)",
+            "mp_006sdm": "Arica Harbor (Squad Deathmatch)",
+            "mp_007sdm": "White Pass (Squad Deathmatch)",
+            "mp_009sdm": "Laguna Presa (Squad Deathmatch)"}
+    cmd = "admin.currentLevel"
+
+    level_getter = action_pool.spawn(send_command, skt, cmd)
+
+    level = level_getter.wait()[1].split('/')[1].lower()
+
+    for m in maps:
+        if m.lower() in level.lower():
+            return maps[level] + " (%s)" % m
+
+    return level
+
+def get_players(skt):
+    ''' '''
     #sample=['OK', '[CIA]', 'Therms', '24', '1', '', 'cer566', '24', '2']
     cmd = "admin.listPlayers all"
 
@@ -162,19 +236,59 @@ def get_players_names(skt):
     #get the results from the thread
     players = players_getter.wait()
 
-    #filter the list for just the names
+    if players[0] == 'OK':
+        players = players[1:]
+
     field_count = 0
-    players_l = []
+    players_output = []
     p =[]
-    for player in players[1:]:
+    for player in players:
         p.append(player)
         field_count += 1
         if field_count == 4:
                 field_count = 0
-                players_l.append(tuple(p))
+                players_output.append(tuple(p))
                 p = []
 
-    players = [x[1] for x in players_l]
+    return players_output
+
+def get_clans(skt):
+    ''' Returns a dict of clan: players.
+    '''
+    players = get_players(skt)
+
+    #filter the list
+    field_count = 0
+    players_l = []
+    clans = {}
+    for player in players:
+        if player[0] in clans:
+            clans[player[0]].append(player[1])
+        else:
+            clans[player[0]] = [player[1]]
+
+    return clans
+
+def get_players_names(skt):
+    ''' Returns a list of player names on the server.
+    '''
+    _players = get_players(skt)
+    print "_PLAYERS: %s" % _players
+    players = [x[1] for x in _players]
+
+    #filter the list for just the names
+    #field_count = 0
+    #players_l = []
+    #p =[]
+    #for player in players[1:]:
+    #    p.append(player)
+    #    field_count += 1
+    #    if field_count == 4:
+    #            field_count = 0
+    #            players_l.append(tuple(p))
+    #            p = []
+    #
+    #players = [x[1] for x in players_l]
 
     return players
 
@@ -183,7 +297,7 @@ def select_player(player, players, admin, skt):
         If substring isn't unique enough, or if no matches are found, we'll
         message the admin who initiated the command informing them of this.
     '''
-
+    #print "FINDING %s AMONGST %s BY %s" % (player, players, admin)
     #Find player amongst players
     matches = []
     for p in players:
@@ -235,7 +349,9 @@ if __name__ == '__main__':
     admins = open("config/admins").read().split("\n")
     print "ADMINS: %s" % admins
     cmds = {"!serveryell": serveryell,
-            "!playeryell": playeryell}
+            "!playeryell": playeryell,
+            "!map": map_,
+            "!kick": kick}
 
     event_socket = _server_connect(host, port)
     _auth(event_socket, pw)
@@ -267,7 +383,7 @@ if __name__ == '__main__':
         #print '-'*30
 
         #process event
-        if words[0] == 'player.onChat' and words[1] in admins:
+        if words[0] == 'player.onChat':
             try:
                 chat_words = shlex.split(words[2])
             except:
