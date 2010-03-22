@@ -9,8 +9,12 @@ Store rcon password in config/password.
 
 Current functioning commands
 !commandname <optional argument>
+Commands which accept "playername" also accept partial player names
 -----------------------------------
 !serveryell <duration_in_seconds> "message in quotes"		- Sends message to everyone on server
 !playeryell <duration_in_seconds> "playername" "message"	- Sends message to specific player
 !map														- Sends message to typer continaing mapname
-!kick														- Kicks specified player
+!kick "playername"											- Kicks specified player
+!kicksay "playername" "message to display to player"		- Kicks specified player and displays a message to them.
+!ban <duration_in_seconds> "playername"						- Bans specified player.  Uses PB if PB is turned on.
+

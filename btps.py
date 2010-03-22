@@ -58,6 +58,8 @@ def send_command(skt, cmd):
 
     skt.send(request)
 
+    log("CMD SENT: %s" % cmd)
+
     # Wait for response from server
     packet = skt.recv(4096)
     _, is_response, _, words = bc2_misc._decode_pkt(packet)
@@ -80,9 +82,6 @@ def serveryell(admin, words, skt):
 
         If duration isn't included we default to 4 seconds.
     '''
-
-    global command_q
-
     if admin not in admins:
         return
 
@@ -106,8 +105,7 @@ def serveryell(admin, words, skt):
     cmd = 'admin.yell "%s" %s all' % (msg, seconds*1000)
 
     #insert command into command queue
-    command_q.put(cmd)
-    #command_qer(cmd)
+    command_qer(cmd)
 
 def playeryell(admin, words, skt):
     ''' Command action.
@@ -151,7 +149,7 @@ def playeryell(admin, words, skt):
         cmd = 'admin.yell "%s" %s player %s' % (msg, seconds*1000, player_name)
 
         #insert command into command queue
-        command_q.put(cmd)
+        command_qer(cm)
 
 def map_(player, words, skt):
     ''' Command action.
@@ -168,8 +166,7 @@ def map_(player, words, skt):
     level = get_map(skt)
 
     cmd = 'admin.yell "%s" %s player %s' % (level, message_duration, player)
-
-    command_q.put(cmd)
+    command_qer(cmd)
 
 def kick(admin, words, skt):
     global command_q
@@ -192,7 +189,7 @@ def kick(admin, words, skt):
             print "********************: " + punkb
             if _get_var('vars.punkBuster', skt) == 'false':
                 cmd = 'admin.kickPlayer %s' % player_name
-                command_q.put(cmd)
+                command_qer(cmd)
             else:
                 _pb_kick(player_name)
         else:
@@ -205,7 +202,7 @@ def _pb_kick(player, time = 1, reason=False):
         cmd_text += " %s" % reason
 
     cmd = _pb_cmd(cmd_text)
-    command_q.put(cmd)
+    command_qer(cmd)
 
 def kicksay(admin, words, skt):
     global command_q
@@ -229,7 +226,7 @@ def kicksay(admin, words, skt):
                 playeryell(admin, ['!playeryell', admin, 'ADMIN: !kicksay is only available when Punkbuster is enabled'], skt)
                 return
             else:
-                _pb_kick(player_name, time=1, reason = ' '.join(words[1:]))
+                _pb_kick(player_name, time=1, reason = ' '.join(words[2:]))
         else:
             playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
 
@@ -262,10 +259,10 @@ def ban(admin, words, skt):
             if punkb == 'false':
                 if duration:
                     cmd = 'admin.banPlayer %s seconds %i' % (player_name, duration)
-                    command_q.put(cmd)
+                    command_qer(cmd)
                 else:
                     cmd = 'admin.banPlayer %s perm'
-                    command_q.put(cmd)
+                    command_qer(cmd)
             else:
                 if duration:
                     d = duration/60
@@ -274,7 +271,7 @@ def ban(admin, words, skt):
                     _pb_kick(player_name, d)
                 else:
                     cmd = _pb_cmd('PB_SV_Ban %s' % player_name)
-                    command_q.put(cmd)
+                    command_qer(cmd)
         else:
             playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
 
@@ -291,7 +288,7 @@ def unban(admin, words, skt):
 
     cmd = "admin.unbanPlayer " % words[1]
     print "COMMAND: %s" % cmd
-    command_q.put(cmd)
+    command_qer(cmd)
 
     cmd = ""
     cmd = _pb_cmd()
@@ -434,6 +431,7 @@ def command_processor():
             cmd = command_q.get()
         except:
             continue
+        log("FETCHED FROM QUEUE: %s" % cmd)
         send_command(command_socket, cmd)
 
 def log(msg):
@@ -446,6 +444,12 @@ def _pb_cmd(cmd):
 def command_qer(cmd):
     global command_q
     command_q.put(cmd)
+    log("ENQUEUED: %s" % cmd)
+
+def event_logger():
+    ''' Implement mysql event logger
+    '''
+    pass
 
 client_seq_number = 0
 
