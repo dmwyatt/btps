@@ -107,6 +107,7 @@ def serveryell(admin, words, skt):
 
     #insert command into command queue
     command_q.put(cmd)
+    #command_qer(cmd)
 
 def playeryell(admin, words, skt):
     ''' Command action.
@@ -186,13 +187,121 @@ def kick(admin, words, skt):
         return
     else:
         if player_name not in admins:
-            cmd = 'admin.kickPlayer %s' % player_name
-            command_q.put(cmd)
+            punkb_getter = action_pool.spawn(_get_var, 'vars.punkBuster', skt)
+            punkb = punkb_getter.wait()
+            print "********************: " + punkb
+            if _get_var('vars.punkBuster', skt) == 'false':
+                cmd = 'admin.kickPlayer %s' % player_name
+                command_q.put(cmd)
+            else:
+                _pb_kick(player_name)
         else:
             playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
 
+def _pb_kick(player, time = 1, reason=False):
+    cmd_text = 'PB_SV_Kick "%s" %i' % (player, time)
 
+    if reason:
+        cmd_text += " %s" % reason
 
+    cmd = _pb_cmd(cmd_text)
+    command_q.put(cmd)
+
+def kicksay(admin, words, skt):
+    global command_q
+
+    if admin not in admins:
+        return
+
+    _players = get_players_names(skt)
+
+    player_name = select_player(words[1], _players, admin, skt)
+
+    if player_name == 1:
+        return
+    elif player_name == 2:
+        return
+    else:
+        if player_name not in admins or player_name == 'Therms':
+            punkb_getter = action_pool.spawn(_get_var, 'vars.punkBuster', skt)
+            punkb = punkb_getter.wait()
+            if _get_var('vars.punkBuster', skt) == 'false':
+                playeryell(admin, ['!playeryell', admin, 'ADMIN: !kicksay is only available when Punkbuster is enabled'], skt)
+                return
+            else:
+                _pb_kick(player_name, time=1, reason = ' '.join(words[1:]))
+        else:
+            playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
+
+def ban(admin, words, skt):
+    global command_q
+
+    if admin not in admins:
+        return
+
+    try:
+        duration = int(words[1])
+    except:
+        duration = 0
+
+    _players = get_players_names(skt)
+
+    if duration:
+        player_name = select_player(words[2], _players, admin, skt)
+    else:
+        player_name = select_player(words[1], _players, admin, skt)
+
+    if player_name == 1:
+        return
+    elif player_name == 2:
+        return
+    else:
+        if player_name not in admins:
+            punkb_getter = action_pool.spawn(_get_var, 'vars.punkBuster', skt)
+            punkb = punkb_getter.wait()
+            if punkb == 'false':
+                if duration:
+                    cmd = 'admin.banPlayer %s seconds %i' % (player_name, duration)
+                    command_q.put(cmd)
+                else:
+                    cmd = 'admin.banPlayer %s perm'
+                    command_q.put(cmd)
+            else:
+                if duration:
+                    d = duration/60
+                    if d < 1:
+                        d = 1
+                    _pb_kick(player_name, d)
+                else:
+                    cmd = _pb_cmd('PB_SV_Ban %s' % player_name)
+                    command_q.put(cmd)
+        else:
+            playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
+
+def unban(admin, words, skt):
+    global command_q
+
+    if admin not in admins:
+        return
+
+    try:
+        duration = int(words[1])
+    except:
+        duration = 0
+
+    cmd = "admin.unbanPlayer " % words[1]
+    print "COMMAND: %s" % cmd
+    command_q.put(cmd)
+
+    cmd = ""
+    cmd = _pb_cmd()
+    ################WORKING HERE
+
+def _get_var(var, skt):
+    var_getter = action_pool.spawn(send_command, skt, var)
+    var = var_getter.wait()[1]
+
+    return var
 
 def get_map(skt):
     maps = {"mp_001": "Panama Canal (Conquest)",
@@ -273,7 +382,6 @@ def get_players_names(skt):
     ''' Returns a list of player names on the server.
     '''
     _players = get_players(skt)
-    print "_PLAYERS: %s" % _players
     players = [x[1] for x in _players]
 
     #filter the list for just the names
@@ -297,8 +405,9 @@ def select_player(player, players, admin, skt):
         If substring isn't unique enough, or if no matches are found, we'll
         message the admin who initiated the command informing them of this.
     '''
-    #print "FINDING %s AMONGST %s BY %s" % (player, players, admin)
     #Find player amongst players
+
+    #print "searching for %s amonst %s at %s auth" % (player, players, admin)
     matches = []
     for p in players:
         if player.lower() in p.lower():
@@ -331,6 +440,13 @@ def log(msg):
     dt = datetime.datetime.today().strftime("%m/%d/%y %H:%M:%S")
     print "%s - %s" % (dt, msg)
 
+def _pb_cmd(cmd):
+    return 'punkBuster.pb_sv_command "%s"' % cmd
+
+def command_qer(cmd):
+    global command_q
+    command_q.put(cmd)
+
 client_seq_number = 0
 
 if __name__ == '__main__':
@@ -351,7 +467,9 @@ if __name__ == '__main__':
     cmds = {"!serveryell": serveryell,
             "!playeryell": playeryell,
             "!map": map_,
-            "!kick": kick}
+            "!kick": kick,
+            "!kicksay": kicksay,
+            "!ban": ban}
 
     event_socket = _server_connect(host, port)
     _auth(event_socket, pw)
