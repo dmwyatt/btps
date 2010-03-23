@@ -8,6 +8,7 @@ from pkg import bc2_misc
 import eventlet
 from eventlet.green import socket
 from eventlet.green import time
+import mysql.connector
 #import socket
 
 def _server_connect(host, port):
@@ -58,7 +59,7 @@ def send_command(skt, cmd):
 
     skt.send(request)
 
-    log("CMD SENT: %s" % cmd)
+    screen_log("CMD SENT: %s" % cmd)
 
     # Wait for response from server
     packet = skt.recv(4096)
@@ -82,6 +83,10 @@ def serveryell(admin, words, skt):
 
         If duration isn't included we default to 4 seconds.
     '''
+    if len(words) < 2:
+        playeryell(admin, ['!playeryell', admin, 'ADMIN: Must specify text to yell.'], skt)
+        return
+
     if admin not in admins:
         return
 
@@ -149,7 +154,7 @@ def playeryell(admin, words, skt):
         cmd = 'admin.yell "%s" %s player %s' % (msg, seconds*1000, player_name)
 
         #insert command into command queue
-        command_qer(cm)
+        command_qer(cmd)
 
 def map_(player, words, skt):
     ''' Command action.
@@ -381,20 +386,6 @@ def get_players_names(skt):
     _players = get_players(skt)
     players = [x[1] for x in _players]
 
-    #filter the list for just the names
-    #field_count = 0
-    #players_l = []
-    #p =[]
-    #for player in players[1:]:
-    #    p.append(player)
-    #    field_count += 1
-    #    if field_count == 4:
-    #            field_count = 0
-    #            players_l.append(tuple(p))
-    #            p = []
-    #
-    #players = [x[1] for x in players_l]
-
     return players
 
 def select_player(player, players, admin, skt):
@@ -426,15 +417,17 @@ def command_processor():
         the server.
     '''
     global command_socket
+    screen_log("Command processor thread started")
+    screen_log("Starting command processor loop")
     while True:
         try:
             cmd = command_q.get()
         except:
             continue
-        log("FETCHED FROM QUEUE: %s" % cmd)
+        screen_log("FETCHED FROM COMMAND QUEUE: %s" % cmd)
         send_command(command_socket, cmd)
 
-def log(msg):
+def screen_log(msg):
     dt = datetime.datetime.today().strftime("%m/%d/%y %H:%M:%S")
     print "%s - %s" % (dt, msg)
 
@@ -444,12 +437,89 @@ def _pb_cmd(cmd):
 def command_qer(cmd):
     global command_q
     command_q.put(cmd)
-    log("ENQUEUED: %s" % cmd)
+    screen_log("COMMAND QUEUED: %s" % cmd)
 
-def event_logger():
+def event_logger_qer(event):
     ''' Implement mysql event logger
     '''
-    pass
+    global event_log_q
+    event_log_q.put(event)
+    screen_log("EVENT QUEUED: %s" % words[0])
+
+def _get_mysql_config():
+    config = open('config\\mysql', 'r').read().split("\n")
+    cfg = {}
+    for c in config:
+        split = shlex.split(c)
+        cfg[split[0][:-1]] = split[1]
+    return cfg
+
+def event_logger():
+    ''' Loops waiting for events to be in event_log_q and then logs them to
+        mysql.
+    '''
+    global event_log_q
+    screen_log("Event logger thread started")
+    cfg = _get_mysql_config()
+    db = mysql.connector.Connect(host=cfg['host'],
+                             user=cfg['user'],
+                             password=cfg['password'],
+                             database=cfg['database'])
+    cursor = db.cursor()
+
+    stmt_create =   """
+                    CREATE TABLE IF NOT EXISTS bc2_events (
+                        id TINYINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                        event VARCHAR(30) DEFAULT '' NOT NULL,
+                        info TEXT,
+                        PRIMARY KEY (id)
+                    )"""
+    cursor.execute(stmt_create)
+
+    screen_log("Starting event_logger loop")
+    while True:
+        try:
+            evt = event_log_q.get()
+        except:
+            continue
+
+        screen_log("FETCHED FROM EVENT QUEUE: %s" % evt)
+        stmt_insert = "INSERT INTO bc2_events (event, info) VALUES (%s, %s)"
+        try:
+            cursor.execute(stmt_insert, (evt[0], ' '.join(evt[1:])))
+            db.commit()
+        except:
+            screen_log("ERROR INSERTING INTO MYSQL")
+
+def event_onchat(words):
+    player = words[1]
+    text = ' '.join(words[2:])
+    stmt_insert = "INSERT INTO bc2_chat (player, text) VALUES (%s, %s)"
+    cursor.execute(stmt_insert)
+
+def create_tables():
+    chat_create = """CREATE TABLE IF NOT EXISTS bc2_chat (
+                        id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                        player VARCHAR(50) DEFAULT '' NOT NULL,
+                        chat TEXT,
+                        PRIMARY KEY (id))
+                        """
+    #conx_create = """CREATE TABLE IF NOT EXISTS bc2_connections (
+    #                    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    #                    player VARCHAR(50) DEFAULT '' NOT NULL,
+    #                    join)"""
+    soldier_info_create = """CREATE TABLE IF NOT EXISTS bc2_soldiers(
+                                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                                soldier VARCHAR(50) DEFAULT '' NOT NULL,
+                                pb_guid VARCHAR(50) DEFAULT '' NOT NULL,
+                                PRIMARY KEY(id))
+                                """
+
+    db = mysql.connector.Connect(host=cfg['host'],
+                             user=cfg['user'],
+                             password=cfg['password'],
+                             database=cfg['database'])
+    cursor = db.cursor()
 
 client_seq_number = 0
 
@@ -459,6 +529,9 @@ if __name__ == '__main__':
 
     #queue of commands to send to BC2 server
     command_q = eventlet.Queue()
+
+    #queue of events to log
+    #event_log_q = eventlet.Queue()
 
     host = "75.102.38.3"
     port = 48888
@@ -483,6 +556,7 @@ if __name__ == '__main__':
     _auth(command_socket, pw)
 
     action_pool.spawn_n(command_processor)
+    action_pool.spawn_n(event_logger)
 
 
     while True:
@@ -500,7 +574,8 @@ if __name__ == '__main__':
 
         #print log("received pkt with words (and initiated woo): ")
         m = "EVENT: %s PARAM: %s" % (words[0], words[1:])
-        log(m)
+        screen_log(m)
+        #event_logger_qer(words)
         #print m
         #print '-'*30
 
