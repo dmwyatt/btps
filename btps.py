@@ -1,11 +1,15 @@
+#first we have to monkey-patch standard library to support green threads
+import eventlet
+eventlet.monkey_patch()
+
 import datetime
 import hashlib
 import os
+import re
 import shlex
 from struct import *
 
 from pkg import bc2_misc
-import eventlet
 from eventlet.green import socket
 from eventlet.green import time
 import mysql.connector
@@ -439,11 +443,11 @@ def command_qer(cmd):
     command_q.put(cmd)
     screen_log("COMMAND QUEUED: %s" % cmd)
 
-def event_logger_qer(event):
+def event_logger_qer(event, recv_time):
     ''' Implement mysql event logger
     '''
     global event_log_q
-    event_log_q.put(event)
+    event_log_q.put((event, recv_time))
     screen_log("EVENT QUEUED: %s" % words[0])
 
 def _get_mysql_config():
@@ -460,6 +464,9 @@ def event_logger():
     '''
     global event_log_q
     screen_log("Event logger thread started")
+
+    create_tables()
+
     cfg = _get_mysql_config()
     db = mysql.connector.Connect(host=cfg['host'],
                              user=cfg['user'],
@@ -467,71 +474,166 @@ def event_logger():
                              database=cfg['database'])
     cursor = db.cursor()
 
-    stmt_create =   """
-                    CREATE TABLE IF NOT EXISTS bc2_events (
-                        id TINYINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                        event VARCHAR(30) DEFAULT '' NOT NULL,
-                        info TEXT,
-                        PRIMARY KEY (id)
-                    )"""
-    cursor.execute(stmt_create)
-
     screen_log("Starting event_logger loop")
     while True:
         try:
             evt = event_log_q.get()
         except:
             continue
+        recv_time = evt[1].strftime("%Y-%m-%d %H:%M:%S")
+        evt = evt[0]
 
         screen_log("FETCHED FROM EVENT QUEUE: %s" % evt)
-        stmt_insert = "INSERT INTO bc2_events (event, info) VALUES (%s, %s)"
-        try:
-            cursor.execute(stmt_insert, (evt[0], ' '.join(evt[1:])))
-            db.commit()
-        except:
-            screen_log("ERROR INSERTING INTO MYSQL")
 
-def event_onchat(words):
+        if evt[0] == 'player.onChat':
+            stmt_insert = "INSERT INTO bc2_chat (dt, player, chat) VALUES (%s, %s, %s)"
+            cursor.execute(stmt_insert, (recv_time, evt[1], evt[2]))
+            db.commit()
+        elif evt[0] == 'player.onJoin':
+            pass
+            #print evt, recv_time
+            stmt_insert = "INSERT INTO bc2_connections (player, jointime) VALUES (%s, %s)"
+            cursor.execute(stmt_insert, (evt[1], recv_time))
+            db.commit()
+        elif evt[0] == 'player.onLeave':
+            pass
+        elif evt[0] == 'player.onKill':
+            stmt_insert = "INSERT INTO bc2_kills (dt, victim, killer) VALUES (%s, %s, %s)"
+            cursor.execute(stmt_insert, (recv_time, evt[2], evt[1]))
+            db.commit()
+        elif evt[0] == 'punkBuster.onMessage':
+            if is_pb_new_connection(evt[1]):
+                try:
+                    name, ip = parse_pb_new_connection(evt[1])
+                    stmt_update = "UPDATE bc2_connections SET ip=%s WHERE player=%s AND leavetime IS NULL"
+                    screen_log("EXECUTING: %s" % stmt_update % (ip, name))
+                    cursor.execute(stmt_update, (ip, name))
+                    db.commit()
+                except:
+                    screen_log("ERROR:  Can't parse punkbuster lost connection msg.")
+
+            elif is_pb_lost_connection(evt[1]):
+                try:
+                    name, pb_guid = parse_pb_lost_connection(evt[1])
+                    stmt_update = "UPDATE bc2_connections SET pb_guid=%s WHERE player=%s and pb_guid IS NULL"
+                    screen_log("EXECUTING: %s" % stmt_update % (pb_guid, name))
+                    cursor.execute(stmt_update, (pb_guid, name))
+                    db.commit()
+                except:
+                    screen_log("ERROR:  Can't parse punkbuster lost connection msg.")
+            stmt_insert = "INSERT INTO bc2_punkbuster (dt, punkbuster) VALUES (%s, %s)"
+            cursor.execute(stmt_insert, (recv_time, evt[1]))
+            db.commit()
+        else:
+            pass
+
+def is_pb_new_connection(pb):
+    if "PunkBuster Server: New Connection (slot" in pb:
+        return True
+    return False
+
+def is_pb_lost_connection(pb):
+    if "PunkBuster Server: Lost Connection (slot" in pb:
+        return True
+    return False
+
+def parse_pb_new_connection(pb):
+    try:
+        name = re.search(r'"[-\w&()*+./:;<=>?\[\]\^{|}]{4,16}"', pb).group()[1:-1]
+        ip = re.search(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', pb).group()
+    except:
+        return
+    return name, ip
+
+def parse_pb_lost_connection(pb):
+    try:
+        name = re.search(r'\) [-\w&()*+./:;<=>?\[\]\^{|}]{4,16}\n', pb).group()[2:-1]
+        pb_guid = re.search(r'\b\w{30,50}\(', pb).group()[:-1]
+    except:
+        return
+    return name, pb_guid
+
+def event_onchat(words, recv_time):
+    global event_chat_q
     player = words[1]
-    text = ' '.join(words[2:])
+    text = words[2]
     stmt_insert = "INSERT INTO bc2_chat (player, text) VALUES (%s, %s)"
-    cursor.execute(stmt_insert)
+
 
 def create_tables():
-    chat_create = """CREATE TABLE IF NOT EXISTS bc2_chat (
-                        id INT UNSIGNED NOT NULL AUTO_INCREMENT,
-                        player VARCHAR(50) DEFAULT '' NOT NULL,
-                        chat TEXT,
-                        PRIMARY KEY (id))
-                        """
-    #conx_create = """CREATE TABLE IF NOT EXISTS bc2_connections (
-    #                    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
-    #                    player VARCHAR(50) DEFAULT '' NOT NULL,
-    #                    join)"""
-    soldier_info_create = """CREATE TABLE IF NOT EXISTS bc2_soldiers(
-                                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
-                                soldier VARCHAR(50) DEFAULT '' NOT NULL,
-                                pb_guid VARCHAR(50) DEFAULT '' NOT NULL,
-                                PRIMARY KEY(id))
-                                """
-
+    tables = []
+    tables.append("""
+                  CREATE TABLE IF NOT EXISTS bc2_chat (
+                  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                  dt DATETIME,
+                  player VARCHAR(50) DEFAULT '' NOT NULL,
+                  chat TEXT,
+                  PRIMARY KEY (id))
+                  """)
+    tables.append("""
+                  CREATE TABLE IF NOT EXISTS bc2_connections (
+                  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                  player VARCHAR(50),
+                  ip VARCHAR(15),
+                  pb_guid VARCHAR(50),
+                  jointime DATETIME,
+                  leavetime DATETIME,
+                  PRIMARY KEY (id))
+                  """)
+    tables.append("""
+                  CREATE TABLE IF NOT EXISTS bc2_punkbuster(
+                  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                  dt DATETIME,
+                  punkbuster TEXT,
+                  PRIMARY KEY(id))
+                  """)
+    tables.append("""
+                  CREATE TABLE IF NOT EXISTS bc2_kills(
+                  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                  dt DATETIME,
+                  victim VARCHAR(50) DEFAULT '' NOT NULL,
+                  killer VARCHAR(50) DEFAULT '' NOT NULL,
+                  PRIMARY KEY(id))
+                  """)
+    tables.append("""
+                  CREATE TABLE IF NOT EXISTS bc2_admin(
+                  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                  admin VARCHAR(50) DEFAULT '' NOT NULL,
+                  command VARCHAR(250) DEFAULT '' NOT NULL,
+                  PRIMARY KEY(id))
+                  """)
+    tables.append("""
+                  CREATE TABLE IF NOT EXISTS bc2_btpslog(
+                  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                  dt DATETIME,
+                  message TEXT,
+                  PRIMARY KEY(id))
+                  """)
+    cfg = _get_mysql_config()
     db = mysql.connector.Connect(host=cfg['host'],
                              user=cfg['user'],
                              password=cfg['password'],
                              database=cfg['database'])
     cursor = db.cursor()
 
+    for table in tables:
+        cursor.execute(table)
+
+    db.commit()
+    db.close()
+
 client_seq_number = 0
 
 if __name__ == '__main__':
     #pool of green threads for action
+    pass
     action_pool = eventlet.GreenPool()
 
     #queue of commands to send to BC2 server
     command_q = eventlet.Queue()
 
-    #queue of events to log
-    #event_log_q = eventlet.Queue()
+    #event logging queue
+    event_log_q = eventlet.Queue()
 
     host = "75.102.38.3"
     port = 48888
@@ -560,33 +662,41 @@ if __name__ == '__main__':
 
 
     while True:
-        #print log("waiting for packet")
+
+        #get packet
         packet = event_socket.recv(4096)
+        try:
+            #decode packet
+            _, is_response, sequence, words = bc2_misc._decode_pkt(packet)
+            #ack packet
+            if not is_response:
+                response = bc2_misc._encode_resp(sequence, ["OK"])
+                event_socket.send(response)
+        except:
+            continue
 
-        #decode packet
-        #print log("decoding packet     ")
-        _, is_response, sequence, words = bc2_misc._decode_pkt(packet)
+        if len(words) > 0:
+            recv_time = datetime.datetime.now()
+            event_logger_qer(words, recv_time)
 
-        #ack packet
-        if not is_response:
-            response = bc2_misc._encode_resp(sequence, ["OK"])
-            event_socket.send(response)
+            #process event
+            if words[0] == 'player.onChat':
+                try:
+                    chat_words = shlex.split(words[2])
+                except:
+                    continue
 
-        #print log("received pkt with words (and initiated woo): ")
-        m = "EVENT: %s PARAM: %s" % (words[0], words[1:])
-        screen_log(m)
-        #event_logger_qer(words)
-        #print m
-        #print '-'*30
-
-        #process event
-        if words[0] == 'player.onChat':
-            try:
-                chat_words = shlex.split(words[2])
-            except:
-                continue
-
-            talker = words[1]
-            potential_cmd = chat_words[0].lower()
-            if potential_cmd in cmds:
-                cmds[potential_cmd](talker, chat_words, command_socket)
+                talker = words[1]
+                potential_cmd = chat_words[0].lower()
+                if potential_cmd in cmds:
+                    cmds[potential_cmd](talker, chat_words, command_socket)
+            if words[0] == 'player.onJoin':
+                pass
+            if words[0] == 'player.onLeave':
+                pass
+            if words[0] == 'player.onKill':
+                pass
+            if words[0] == 'punkBuster.onMessage':
+                pass
+        else:
+            continue
