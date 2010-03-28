@@ -17,4 +17,5 @@ Commands which accept "playername" also accept partial player names
 !kick "playername"											- Kicks specified player
 !kicksay "playername" "message to display to player"		- Kicks specified player and displays a message to them.
 !ban <duration_in_seconds> "playername"						- Bans specified player.  Uses PB if PB is turned on.
+!gonext														- Changes to next map in rotation.
 

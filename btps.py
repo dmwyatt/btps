@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 from struct import *
+import uuid
 
 from pkg import bc2_misc
 from eventlet.green import socket
@@ -76,6 +77,14 @@ def send_command(skt, cmd):
 
 def _set_receive_events(skt):
     send_command(skt, "eventsEnabled true")
+
+def gonext(admin, words, skt):
+    if admin not in admins:
+        return
+
+    cmd = 'admin.runNextLevel'
+
+    command_qer(cmd)
 
 def serveryell(admin, words, skt):
     ''' Command action.
@@ -463,8 +472,10 @@ def event_logger():
         mysql.
     '''
     global event_log_q
+    global players_q
     screen_log("Event logger thread started")
 
+    #Make sure our tables exist
     create_tables()
 
     cfg = _get_mysql_config()
@@ -476,31 +487,59 @@ def event_logger():
 
     screen_log("Starting event_logger loop")
     while True:
+        #loop waiting for events
         try:
             evt = event_log_q.get()
         except:
             continue
         recv_time = evt[1].strftime("%Y-%m-%d %H:%M:%S")
+
+        #we only care about [0] from now on
         evt = evt[0]
 
         screen_log("FETCHED FROM EVENT QUEUE: %s" % evt)
 
         if evt[0] == 'player.onChat':
+            #log chat
             stmt_insert = "INSERT INTO bc2_chat (dt, player, chat) VALUES (%s, %s, %s)"
             cursor.execute(stmt_insert, (recv_time, evt[1], evt[2]))
             db.commit()
+
+
         elif evt[0] == 'player.onJoin':
-            pass
-            #print evt, recv_time
+            #Do things for when player joins server
+            if evt[1] == '':
+                #sometimes this event returns '', so use alt-method of guessing players name
+                evt[1] == get_new_player()
+
+            #log new connection
             stmt_insert = "INSERT INTO bc2_connections (player, jointime) VALUES (%s, %s)"
             cursor.execute(stmt_insert, (evt[1], recv_time))
             db.commit()
+
+            #update our running-balance list
+            active_players_add(evt[1])
+
+
         elif evt[0] == 'player.onLeave':
-            pass
+            #Do things for when player leaves server
+
+            #log disconnect
+            stmt_update = """UPDATE bc2_connections
+                                SET leavetime=%s
+                                WHERE player=%s
+                                AND leavetime is NULL
+                                AND %s > jointime"""
+            cursor.execute(stmt_update, (recv_time, evt[1], recv_time))
+            db.commit()
+
+
         elif evt[0] == 'player.onKill':
             stmt_insert = "INSERT INTO bc2_kills (dt, victim, killer) VALUES (%s, %s, %s)"
             cursor.execute(stmt_insert, (recv_time, evt[2], evt[1]))
             db.commit()
+
+
         elif evt[0] == 'punkBuster.onMessage':
             if is_pb_new_connection(evt[1]):
                 try:
@@ -527,6 +566,60 @@ def event_logger():
         else:
             pass
 
+def get_new_player():
+    ''' Compares current player list to our running-balance of players to see
+        who is on the server but isn't on our running-balance.
+    '''
+    global command_socket
+    curr_players = get_players_names(command_socket)
+    players = get_active_players_list()
+    added = 0
+    for p in curr_players:
+        if p not in players:
+            added += 1
+    if added == 1:
+        return added
+    else:
+        screen_log("ERROR: Multiple players on server that aren't in active_players")
+        return
+
+def active_player_kd(killer, victim):
+    global players_q
+    while True:
+        try:
+            players = players_q.get()
+            break
+        except:
+            pass
+    players[killer][0] += 1
+    players[victim][1] += 1
+    players_q.put(players)
+
+def active_players_add(add):
+    global players_q
+    players = players_q.get()
+    players[add] = 0
+    players_q.put(players)
+
+def active_players_remove(remove):
+    global players_q
+    players = players_q.get()
+    players[remove].pop()
+    players_q.put(players)
+
+def get_active_players_list():
+    global players_q
+    players = players_q.get()
+    players_q.put(players)
+    return players
+
+def known_player(player):
+    players = players_q.get()
+    players_q.put(players)
+    if player in players:
+        return True
+    return False
+
 def is_pb_new_connection(pb):
     if "PunkBuster Server: New Connection (slot" in pb:
         return True
@@ -539,7 +632,7 @@ def is_pb_lost_connection(pb):
 
 def parse_pb_new_connection(pb):
     try:
-        name = re.search(r'"[-\w&()*+./:;<=>?\[\]\^{|}]{4,16}"', pb).group()[1:-1]
+        name = re.search(r'"[-\w&()*+./:;<=>?\[\]\^{|} ]{4,16}"', pb).group()[1:-1]
         ip = re.search(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', pb).group()
     except:
         return
@@ -547,7 +640,7 @@ def parse_pb_new_connection(pb):
 
 def parse_pb_lost_connection(pb):
     try:
-        name = re.search(r'\) [-\w&()*+./:;<=>?\[\]\^{|}]{4,16}\n', pb).group()[2:-1]
+        name = re.search(r'\) [-\w&()*+./:;<=>?\[\]\^{|} ]{4,16}\n', pb).group()[2:-1]
         pb_guid = re.search(r'\b\w{30,50}\(', pb).group()[:-1]
     except:
         return
@@ -625,8 +718,13 @@ def create_tables():
 client_seq_number = 0
 
 if __name__ == '__main__':
+    #config
+    host = "75.102.38.3"
+    port = 48888
+    pw = open("config/password").read().strip()
+    admins = open("config/admins").read().split("\n")
+
     #pool of green threads for action
-    pass
     action_pool = eventlet.GreenPool()
 
     #queue of commands to send to BC2 server
@@ -635,34 +733,37 @@ if __name__ == '__main__':
     #event logging queue
     event_log_q = eventlet.Queue()
 
-    host = "75.102.38.3"
-    port = 48888
-    #f = open(os.path.join("..", "bc2_info.pw"),"r")
-    #pw = f.read().strip()
-    pw = open("config/password").read().strip()
+    #queue containing updates to our running balance of active players
+    players_q = eventlet.Queue()
 
-    admins = open("config/admins").read().split("\n")
-    print "ADMINS: %s" % admins
+    #dictionary of commands with their functions
     cmds = {"!serveryell": serveryell,
             "!playeryell": playeryell,
             "!map": map_,
             "!kick": kick,
             "!kicksay": kicksay,
-            "!ban": ban}
+            "!ban": ban,
+            "!gonext": gonext}
 
+    #establish connection for event stream
     event_socket = _server_connect(host, port)
     _auth(event_socket, pw)
     _set_receive_events(event_socket)
 
+    #establish connection for outgoing commands
     command_socket = _server_connect(host, port)
     _auth(command_socket, pw)
 
+    #spawn counsumer threads
     action_pool.spawn_n(command_processor)
     action_pool.spawn_n(event_logger)
 
+    #get players on server at startup
+    players_q.put(dict.fromkeys(get_players_names(command_socket)))
+
+    screen_log("%i players on server." % len(get_active_players_list()))
 
     while True:
-
         #get packet
         packet = event_socket.recv(4096)
         try:
@@ -677,6 +778,8 @@ if __name__ == '__main__':
 
         if len(words) > 0:
             recv_time = datetime.datetime.now()
+
+            #send event to the event queue
             event_logger_qer(words, recv_time)
 
             #process event
@@ -689,6 +792,7 @@ if __name__ == '__main__':
                 talker = words[1]
                 potential_cmd = chat_words[0].lower()
                 if potential_cmd in cmds:
+                    #send command to the appropriate function
                     cmds[potential_cmd](talker, chat_words, command_socket)
             if words[0] == 'player.onJoin':
                 pass
