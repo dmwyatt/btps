@@ -18,9 +18,35 @@ import mysql.connector
 ############################################################
 #Consumer loops
 ############################################################
-def database_processor():
-    global db_q
-    screen_log("Database access thread started")
+def log_processor():
+    global log_q
+    screen_log("Database logger access thread started")
+    #Make sure our tables exist
+    create_tables()
+
+    cfg = _get_mysql_config()
+    db = mysql.connector.Connect(host=cfg['host'],
+                             user=cfg['user'],
+                             password=cfg['password'],
+                             database=cfg['database'])
+    cursor = db.cursor()
+
+    while True:
+        #loop waiting for log messages
+        try:
+            msg = log_q.get()
+        except:
+            continue
+
+        screen_log("LOGGING: " % msg)
+        dt = datetime.datetime.today().strftime("%m/%d/%y %H:%M:%S")
+        stmt_insert = "INSERT INTO bc2_btpslog (dt, message) VALUES (%s, %s)"
+        try:
+            cursor.execute(stmt_insert, (dt, msg))
+            db.commit()
+        except:
+            screen_log("ERROR LOGGING!!!")
+
 def command_processor():
     ''' Loops waiting for commands to be in command_q and then sends them to
         the server.
@@ -34,8 +60,7 @@ def command_processor():
         except:
             continue
         cmd = cmd[1]
-        screen_log("FETCHED FROM COMMAND QUEUE: %s" % cmd)
-        send_command(command_socket, cmd)
+        _send_command(command_socket, cmd)
 
 def event_logger():
     ''' Loops waiting for events to be in event_log_q and then logs them to
@@ -52,9 +77,9 @@ def event_logger():
                              user=cfg['user'],
                              password=cfg['password'],
                              database=cfg['database'])
+
     cursor = db.cursor()
 
-    screen_log("Starting event_logger loop")
     while True:
         #loop waiting for events
         try:
@@ -67,54 +92,69 @@ def event_logger():
         #we only care about [0] from now on
         evt = evt[0]
 
-        screen_log("FETCHED FROM EVENT QUEUE: %s" % evt)
-
-
         if evt[0] == 'player.onChat':
             #log chat
+            screen_log("player.onChat - %s: %s" % (evt[1], evt[2]))
             stmt_insert = "INSERT INTO bc2_chat (dt, player, chat) VALUES (%s, %s, %s)"
-            cursor.execute(stmt_insert, (recv_time, evt[1], evt[2]))
-            db.commit()
+            try:
+                cursor.execute(stmt_insert, (recv_time, evt[1], evt[2]))
+                db.commit()
+            except:
+                log_q.put("Error executing: %s" % stmt_insert % (recv_time, evt[1], evt[2]))
 
 
         elif evt[0] == 'player.onJoin':
             #Do things for when player joins server
             stmt_insert = "INSERT INTO bc2_connections (player, jointime) VALUES (%s, %s)"
-
             if evt[1] == '':
                 #sometimes this event returns '', so use alt-method of guessing players name
                 player = find_blank_playername(cursor)
-                cursor.execute(stmt_insert, (player, recv_time))
-                db.commit()
-                stmt_insert = "INSERT INTO bc2_btpslog (dt, message) VALUES (%s, %s)"
-                cursor.execute(stmt_insert, (recv_time, "Found blank playername: %s" % player))
-                db.commit()
+                screen_log("player.onJoin - %s" % player)
+                try:
+                    cursor.execute(stmt_insert, (player, recv_time))
+                    db.commit()
+                    log_q.put("Found blank playername: %s" % player)
+                except:
+                    log_q.put("Error executing: %s" % stmt_insert % (player, recv_time))
             else:
                 #log new connection
-                cursor.execute(stmt_insert, (evt[1], recv_time))
-                db.commit()
+                screen_log("player.onJoin - %s" % evt[1])
+                try:
+                    cursor.execute(stmt_insert, (evt[1], recv_time))
+                    db.commit()
+                except:
+                    log_q.put("Error executing: %s" % stmt_insert % (evt[1], recv_time))
 
 
         elif evt[0] == 'player.onLeave':
             #Do things for when player leaves server
-
+            screen_log("player.onLeave - %s" % evt[1])
             #log disconnect
             stmt_update = """UPDATE bc2_connections
                                 SET leavetime=%s
                                 WHERE player=%s
                                 AND leavetime is NULL
                                 AND %s > jointime"""
-            cursor.execute(stmt_update, (recv_time, evt[1], recv_time))
-            db.commit()
+            try:
+                cursor.execute(stmt_update, (recv_time, evt[1], recv_time))
+                db.commit()
+            except:
+                log_q.put("Error executing: %s" % stmt_update % (recv_time, evt[1], recv_time))
 
 
         elif evt[0] == 'player.onKill':
+            if display_kills:
+                screen_log("player.onKill - %s killed %s" % (evt[1], evt[2]))
             stmt_insert = "INSERT INTO bc2_kills (dt, victim, killer) VALUES (%s, %s, %s)"
-            cursor.execute(stmt_insert, (recv_time, evt[2], evt[1]))
-            db.commit()
+            try:
+                cursor.execute(stmt_insert, (recv_time, evt[2], evt[1]))
+                db.commit()
+            except:
+                log_q.put("Error executing: %s" % stmt_insert % (recv_time, evt[2], evt[1]))
 
 
         elif evt[0] == 'punkBuster.onMessage':
+            screen_log("punkBuster.onMessage: %s" % evt[1])
             if is_pb_new_connection(evt[1]):
                 try:
                     name, ip = parse_pb_new_connection(evt[1])
@@ -134,9 +174,14 @@ def event_logger():
                     db.commit()
                 except:
                     screen_log("ERROR:  Can't parse punkbuster lost connection msg.")
+
+            #log punkbuster messages
             stmt_insert = "INSERT INTO bc2_punkbuster (dt, punkbuster) VALUES (%s, %s)"
-            cursor.execute(stmt_insert, (recv_time, evt[1]))
-            db.commit()
+            try:
+                cursor.execute(stmt_insert, (recv_time, evt[1]))
+                db.commit()
+            except:
+                log_q.put("Error executing: %s" % stmt_insert % (recv_time, evt[1]))
         else:
             pass
 
@@ -181,7 +226,7 @@ def serveryell(admin, words, skt):
     cmd = 'admin.yell "%s" %s all' % (msg, seconds*1000)
 
     #insert command into command queue
-    command_qer(cmd)
+    command_qer(cmd, prio=1)
 
 def playeryell(admin, words, skt):
     ''' Command action.
@@ -225,7 +270,7 @@ def playeryell(admin, words, skt):
         cmd = 'admin.yell "%s" %s player %s' % (msg, seconds*1000, player_name)
 
         #insert command into command queue
-        command_qer(cmd)
+        command_qer(cmd, prio=1)
 
 def gonext(admin, words, skt):
     ''' Command action.
@@ -237,7 +282,7 @@ def gonext(admin, words, skt):
 
     cmd = 'admin.runNextLevel'
 
-    command_qer(cmd)
+    command_qer(cmd, prio=1)
 
 def map_(player, words, skt):
     ''' Command action.
@@ -272,12 +317,11 @@ def kick(admin, words, skt):
         return
     else:
         if player_name not in admins:
-            punkb_getter = action_pool.spawn(_get_var, 'vars.punkBuster', skt)
-            punkb = punkb_getter.wait()
+            punkb = _get_var(vars.punkBuster, skt)
             print "********************: " + punkb
             if _get_var('vars.punkBuster', skt) == 'false':
                 cmd = 'admin.kickPlayer %s' % player_name
-                command_qer(cmd, prio=1)
+                command_qer(cmd, prio=0)
                 playeryell(admin, ['!playeryell', admin, "ADMIN: Kicking %s." % player_name], skt)
 
             else:
@@ -408,9 +452,7 @@ def get_map(skt):
             "mp_009sdm": "Laguna Presa (Squad Deathmatch)"}
     cmd = "admin.currentLevel"
 
-    level_getter = action_pool.spawn(send_command, skt, cmd)
-
-    level = level_getter.wait()[1].split('/')[1].lower()
+    level = send_command_n_return(cmd)[1].split('/')[1].lower()
 
     for m in maps:
         if m.lower() in level.lower():
@@ -423,11 +465,7 @@ def get_players(skt):
     #sample=['OK', '[CIA]', 'Therms', '24', '1', '', 'cer566', '24', '2']
     cmd = "admin.listPlayers all"
 
-    #spawn a green thread to retrieve the player list
-    players_getter = action_pool.spawn(send_command, skt, cmd)
-
-    #get the results from the thread
-    players = players_getter.wait()
+    players = send_command_n_return(cmd, screen=False)
 
     if players[0] == 'OK':
         players = players[1:]
@@ -508,7 +546,7 @@ def _auth(skt, pw):
     ''' Authenticates to server on socket
     '''
     # Retrieve this connection's 'salt'
-    words = send_command(skt, "login.hashed")
+    words = _send_command(skt, "login.hashed", screen=False)
 
     # Given the salt and the password, combine them and compute hash value
     salt = words[1].decode("hex")
@@ -516,7 +554,7 @@ def _auth(skt, pw):
     pw_hash_encoded = pw_hash.encode("hex").upper()
 
     # Send password hash to server
-    words = send_command(skt, "login.hashed " + pw_hash_encoded)
+    words = _send_command(skt, "login.hashed " + pw_hash_encoded, screen=False)
 
     # if the server didn't like our password, abort
     if words[0] != "OK":
@@ -524,7 +562,7 @@ def _auth(skt, pw):
 
     return skt
 
-def send_command(skt, cmd):
+def _send_command(skt, cmd, screen=True):
     ''' Send cmd over skt.
     '''
     global client_seq_number #maintain seqence numbers
@@ -534,7 +572,9 @@ def send_command(skt, cmd):
 
     skt.send(request)
 
-    screen_log("CMD SENT: %s" % cmd)
+    if screen:
+        screen_log("CMD SENT: %s" % cmd)
+
 
     # Wait for response from server
     packet = skt.recv(4096)
@@ -546,7 +586,19 @@ def send_command(skt, cmd):
     return words
 
 def _set_receive_events(skt):
-    send_command(skt, "eventsEnabled true")
+    _send_command(skt, "eventsEnabled true")
+
+def send_command_n_return(cmd, screen=True):
+    ''' Sends a command to the command queue and optionally waits for
+        a return.  This is a more expensive option than _send_command
+        since we open a new socket.
+    '''
+    temp_socket = _server_connect(host, port)
+    _auth(temp_socket, pw)
+    words = _send_command(temp_socket, cmd, screen=screen)
+    _send_command(temp_socket, "quit", screen=False)
+
+    return words
 
 ############################################################
 #Producers
@@ -554,20 +606,14 @@ def _set_receive_events(skt):
 def command_qer(cmd, prio=2):
     global command_q
     command_q.put((prio,cmd))
-    screen_log("COMMAND QUEUED: %s" % cmd)
+    #screen_log("COMMAND QUEUED: %s" % cmd)
 
 def event_logger_qer(event, recv_time):
     ''' event should be a list of words
     '''
     global event_log_q
     event_log_q.put((event, recv_time))
-    screen_log("EVENT QUEUED: %s (approx. total queued: %i)" % (words[0], event_log_q.qsize()))
-
-def _get_var(var, skt):
-    var_getter = action_pool.spawn(send_command, skt, var)
-    var = var_getter.wait()[1]
-
-    return var
+    #screen_log("EVENT QUEUED: %s (approx. total queued: %i)" % (words[0], event_log_q.qsize()))
 
 ############################################################
 #Event handling
@@ -635,6 +681,13 @@ def find_blank_playername(cursor):
 ############################################################
 #Misc
 ############################################################
+
+def _get_var(var, skt):
+    #var_getter = action_pool.spawn(_send_command, skt, var)
+    #var = var_getter.wait()[1]
+    var = send_command_n_return(var)
+    return var
+
 def screen_log(msg):
     dt = datetime.datetime.today().strftime("%m/%d/%y %H:%M:%S")
     print "%s - %s" % (dt, msg)
@@ -724,6 +777,7 @@ if __name__ == '__main__':
     port = 48888
     pw = open("config/password").read().strip()
     admins = open("config/admins").read().split("\n")
+    display_kills = True
 
     #pool of green threads for action
     action_pool = eventlet.GreenPool()
@@ -734,8 +788,8 @@ if __name__ == '__main__':
     #event logging queue
     event_log_q = eventlet.Queue()
 
-    #database access queue
-    db_q = eventlet.PriorityQueue()
+    #command return queue
+    log_q = eventlet.Queue()
 
     #dictionary of commands with their functions
     cmds = {"!serveryell": serveryell,
@@ -758,6 +812,7 @@ if __name__ == '__main__':
     #spawn counsumer threads
     action_pool.spawn_n(command_processor)
     action_pool.spawn_n(event_logger)
+    action_pool.spawn_n(log_processor)
 
     while True:
         #get packet
