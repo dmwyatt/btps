@@ -602,7 +602,7 @@ def event_logger_qer(event, recv_time):
     '''
     global event_log_q
     event_log_q.put((event, recv_time))
-    screen_log("EVENT QUEUED: %s (approx. total queued: %i)" % (words[0], event_log_q.qsize()), 2)
+    screen_log("EVENT QUEUED: %s (approx. total queued: %i)" % (words[0], event_log_q.qsize()), 3)
 
 ############################################################
 #Event handling
@@ -670,6 +670,7 @@ def find_blank_playername(cursor):
 #Misc
 ############################################################
 def server_manager():
+    global mix_conquest_rush
     our_skt = _server_connect(host, port)
     _auth(our_skt, pw)
     screen_log("Server manager thread started", 2)
@@ -679,11 +680,12 @@ def server_manager():
     while True:
         curr_map = get_map(our_skt)
         curr_map_gamemode = re.search(r"\(\w+\)", curr_map).group()[1:-1].lower()
-        curr_gamemode_setting = send_command_n_return("admin.getPlaylist", our_skt)[1]
+        curr_gamemode_setting = send_command_n_return("admin.getPlaylist", our_skt)[1].lower()
 
         if mix_conquest_rush:
+            screen_log("Checking if gamemode needs switched (map: %s, map mode: %s, mode setting: %s)" % (curr_map, curr_map_gamemode, curr_gamemode_setting), 3)
             #if our current gamemode is the same as the gamemode of the map we're playing, change it
-            if curr_map_gamemode == curr_gamemode_setting.lower():
+            if curr_map_gamemode == curr_gamemode_setting:
                 gamemode_options = list(gamemodes)
 
                 #remove our current gamemode setting from our options
@@ -806,7 +808,7 @@ if __name__ == '__main__':
     admins = open("config/admins").read().split("\n")
     sys_admin = uuid.uuid4()
     admins.append(sys_admin)
-    output_level = 2
+    output_level = 3
     maps = {"mp_001": "Panama Canal (Conquest)",
             "mp_003": "Laguna Alta (Conquest)",
             "mp_005": "Atacama Desert (Conquest)",
