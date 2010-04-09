@@ -9,6 +9,7 @@ import random
 import re
 import shlex
 from struct import *
+import sys
 import uuid
 
 from pkg import bc2_misc
@@ -19,12 +20,38 @@ import mysql.connector
 ############################################################
 #Consumer loops
 ############################################################
+def thread_manager():
+    ''' If a thread is killing itself it will put a message in thread_q.  We
+        fetch that message and restart it.
+    '''
+
+    global thread_q
+    screen_log("Thread manangement thread started", 2)
+
+    thread_msgs = {"event_logger": event_logger,
+                   "test_thread": test_thread}
+
+    while True:
+        if thread_q.empty():
+            continue
+
+        msg = thread_q.get()
+        screen_log("%s thread died, restarting..." % msg, 1)
+        action_pool.spawn_n(thread_msgs[msg])
+
+def test_thread():
+    global thread_q
+    screen_log("Test thread started")
+    time.sleep(10)
+    thread_q.put("test_thread")
+    return
+
+
 def log_processor():
     global log_q
     screen_log("Database logger access thread started", 2)
     #Make sure our tables exist
     create_tables()
-
     cfg = _get_mysql_config()
     db = mysql.connector.Connect(host=cfg['host'],
                              user=cfg['user'],
@@ -32,13 +59,14 @@ def log_processor():
                              database=cfg['database'])
     cursor = db.cursor()
 
+    print "ENTERING LOG LOOP"
     while True:
         #loop waiting for log messages
-        try:
-            msg = log_q.get()
-        except:
+        if log_q.empty():
+            time.sleep(.1)
             continue
 
+        msg = log_q.get()
         screen_log("LOGGING to bc2_btpslog: " % msg, 2)
         dt = datetime.datetime.today().strftime("%m/%d/%y %H:%M:%S")
         stmt_insert = "INSERT INTO bc2_btpslog (dt, message) VALUES (%s, %s)"
@@ -53,14 +81,21 @@ def command_processor():
         the server.
     '''
     global command_socket
+    global command_q
     screen_log("Command processor thread started", 2)
+    print "ENTERING CMD LOOP"
+
+
     while True:
-        try:
-            cmd = command_q.get()
-        except:
+        if command_q.empty():
+            time.sleep(.1)
             continue
+
+
+        cmd = command_q.get()
+        msg_level = cmd[2]
         cmd = cmd[1]
-        _send_command(command_socket, cmd)
+        _send_command(command_socket, cmd, msg_level)
 
 def event_logger():
     ''' Loops waiting for events to be in event_log_q and then logs them to
@@ -70,7 +105,10 @@ def event_logger():
     screen_log("Event logger thread started", 2)
 
     #Make sure our tables exist
-    create_tables()
+    try:
+        create_tables()
+    except:
+        print "TABLE FAIL"
 
     cfg = _get_mysql_config()
     db = mysql.connector.Connect(host=cfg['host'],
@@ -79,19 +117,26 @@ def event_logger():
                              database=cfg['database'])
 
     cursor = db.cursor()
+    event_error = False
 
     while True:
+        if event_error:
+            log_q.put(event_error)
+            event_error = False
+
         #loop waiting for events
-        try:
-            evt = event_log_q.get()
-        except:
+        if event_log_q.empty():
+            time.sleep(.1)
             continue
+
+        evt = event_log_q.get()
 
         recv_time = evt[1].strftime("%Y-%m-%d %H:%M:%S")
 
         #we only care about [0] from now on
         evt = evt[0]
 
+        #screen_log("EVENT: %s" % evt)
         if evt[0] == 'player.onChat':
             #log chat
             screen_log("player.onChat - %s: %s" % (evt[1], evt[2]), 2)
@@ -100,30 +145,42 @@ def event_logger():
                 cursor.execute(stmt_insert, (recv_time, evt[1], evt[2]))
                 db.commit()
             except:
-                log_q.put("Error executing: %s" % stmt_insert % (recv_time, evt[1], evt[2]))
-
+                event_error = "Error executing: %s" % stmt_insert % (recv_time, evt[1], evt[2])
 
         elif evt[0] == 'player.onJoin':
             #Do things for when player joins server
             stmt_insert = "INSERT INTO bc2_connections (player, jointime) VALUES (%s, %s)"
             if evt[1] == '':
                 #sometimes this event returns '', so use alt-method of guessing players name
-                player = find_blank_playername(cursor)
-                screen_log("player.onJoin - %s" % player, 2)
-                try:
-                    cursor.execute(stmt_insert, (player, recv_time))
-                    db.commit()
-                    log_q.put("Found blank playername: %s" % player)
-                except:
-                    log_q.put("Error executing: %s" % stmt_insert % (player, recv_time))
+                #player = find_blank_playername(cursor)
+                #screen_log("player.onJoin - %s" % player, 2)
+                #try:
+                #    cursor.execute(stmt_insert, (player, recv_time))
+                #    db.commit()
+                #    log_q.put("Found blank playername: %s" % player)
+                #except:
+                #    log_q.put("Error executing: %s" % stmt_insert % (player, recv_time))
+                pass
             else:
                 #log new connection
                 screen_log("player.onJoin - %s" % evt[1], 2)
-                try:
-                    cursor.execute(stmt_insert, (evt[1], recv_time))
-                    db.commit()
-                except:
-                    log_q.put("Error executing: %s" % stmt_insert % (evt[1], recv_time))
+                #try:
+                #    cursor.execute(stmt_insert, (evt[1], recv_time))
+                #    db.commit()
+                #except:
+                #    event_error = "Error executing: %s" % stmt_insert % (evt[1], recv_time)
+                pass
+
+        elif evt[0] == 'player.onAuthenticated':
+            #Since player.onJoin sometimes give empty playernames, we're just
+            #going to start using onAuthenticated
+            screen_log("player.onAuthenticated - %s" % evt[1])
+            stmt_insert = "INSERT INTO bc2_connections (player, jointime, ea_guid) VALUES (%s, %s, %s)"
+            try:
+                cursor.execute(stmt_update, (evt[1], recv_time, evt[2]))
+                db.commit()
+            except:
+                event_error = "Error executing: %s" % stmt_update % (evt[2], evt[1])
 
 
         elif evt[0] == 'player.onLeave':
@@ -139,18 +196,17 @@ def event_logger():
                 cursor.execute(stmt_update, (recv_time, evt[1], recv_time))
                 db.commit()
             except:
-                log_q.put("Error executing: %s" % stmt_update % (recv_time, evt[1], recv_time))
+                event_error = "Error executing: %s" % stmt_update % (recv_time, evt[1], recv_time)
 
 
         elif evt[0] == 'player.onKill':
-            if display_kills:
-                screen_log("player.onKill - %s killed %s" % (evt[1], evt[2]), 3)
+            screen_log("player.onKill - %s killed %s" % (evt[1], evt[2]), 3)
             stmt_insert = "INSERT INTO bc2_kills (dt, victim, killer) VALUES (%s, %s, %s)"
             try:
                 cursor.execute(stmt_insert, (recv_time, evt[2], evt[1]))
                 db.commit()
             except:
-                log_q.put("Error executing: %s" % stmt_insert % (recv_time, evt[2], evt[1]))
+                event_error = "Error executing: %s" % stmt_insert % (recv_time, evt[2], evt[1])
 
 
         elif evt[0] == 'punkBuster.onMessage':
@@ -179,15 +235,14 @@ def event_logger():
                 cursor.execute(stmt_insert, (recv_time, evt[1]))
                 db.commit()
             except:
-                log_q.put("Error executing: %s" % stmt_insert % (recv_time, evt[1]))
+                event_error = "Error executing: %s" % stmt_insert % (recv_time, evt[1])
         else:
             pass
-
 
 ############################################################
 #Command functions
 ############################################################
-def serveryell(admin, words, skt):
+def serversay(admin, words, skt):
     ''' Command action.
         Words should be a list formatted like:
             duration included:
@@ -197,36 +252,18 @@ def serveryell(admin, words, skt):
 
         If duration isn't included we default to 4 seconds.
     '''
-    if len(words) < 2:
-        playeryell(admin, ['!playeryell', admin, 'ADMIN: Must specify text to yell.'], skt)
-        return
-
     if admin not in admins:
         return
 
-    #check for included duration
-    try:
-        seconds = int(words[1])
-        no_duration = False
+    if len(words) < 2:
+        _playersay(admin, 'ADMIN: Must specify text to say.')
+        return
 
-    #no duration.  Default to 4 seconds.
-    except:
-        seconds = 4
-        no_duration = True
+    msg = ' '.join(words[1:])
 
-    #Get message to send from words
-    if no_duration:
-        msg = words[1]
-    else:
-        msg = words[2]
+    _serversay(msg)
 
-    #Build command.  Duration is in ms
-    cmd = 'admin.yell "%s" %s all' % (msg, seconds*1000)
-
-    #insert command into command queue
-    command_qer(cmd, prio=1)
-
-def playeryell(admin, words, skt):
+def playersay(admin, words, skt):
     ''' Command action.
         Words should be a list formatted like:
             duration included:
@@ -241,22 +278,8 @@ def playeryell(admin, words, skt):
     if admin not in admins:
         return
 
-    #check for included duration
-    try:
-        seconds = int(words[1])
-        no_duration = False
-
-    #no duration.  Default to 4 seconds.
-    except:
-        seconds = 4
-        no_duration = True
-
-    if no_duration:
-        player = words[1]
-        msg = words[2]
-    else:
-        player = words[2]
-        msg = words[3]
+    player = words[1]
+    msg = ' '.join(words[2:])
 
     player_name = select_player(player, get_players_names(skt), admin, skt)
 
@@ -265,10 +288,75 @@ def playeryell(admin, words, skt):
     elif player_name == 2:
         return
     else:
-        cmd = 'admin.yell "%s" %s player %s' % (msg, seconds*1000, player_name)
+        _playersay(player_name, msg)
 
-        #insert command into command queue
-        command_qer(cmd, prio=1)
+def serveryell(admin, words, skt):
+    ''' Command action.
+        Words should be a list formatted like:
+            duration included:
+                ["!serveryell", seconds, "message"]
+            duration not included:
+                ["!serveryell", "message"]
+
+        If duration isn't included we default to 4 seconds.
+    '''
+    if admin not in admins:
+        return
+
+    if len(words) < 2:
+        _playersay(admin, 'ADMIN: Must specify text to yell.')
+        return
+
+
+    if words[1][:4] == "dur=":
+        try:
+            seconds = int(words[1][4:])
+            msg = ' '.join(words[2:])
+        except:
+            seconds = 4
+            msg = ' '.join(words[1:])
+    else:
+        seconds = 4
+        msg = ' '.join(words[1:])
+
+    _serveryell(msg, seconds)
+
+def playeryell(admin, words, skt):
+    ''' Command action.
+        Words should be a list formatted like:
+            duration included:
+                ["!playeryell", "playername", "dur=seconds", "message"]
+            duration not included:
+                ["!playeryell", "playername", "message"]
+
+        If duration isn't included we default to 4 seconds.
+    '''
+    global command_q
+
+    if admin not in admins:
+        return
+
+    player = words[1]
+
+    if words[2][:4] == "dur=":
+        try:
+            seconds = int(words[2][4:])
+            msg = ' '.join(words[3:])
+        except:
+            seconds = 4
+            msg = ' '.join(words[2:])
+    else:
+        seconds = 4
+        msg = ' '.join(words[2:])
+
+    player_name = select_player(player, get_players_names(skt), admin, skt)
+
+    if player_name == 1:
+        return
+    elif player_name == 2:
+        return
+    else:
+        _playeryell(player_name, msg, seconds)
 
 def gonext(admin, words, skt):
     ''' Command action.
@@ -280,7 +368,7 @@ def gonext(admin, words, skt):
 
     cmd = 'admin.runNextLevel'
 
-    command_qer(cmd, prio=1)
+    command_qer(cmd, 2, prio=1)
 
 def map_(player, words, skt):
     ''' Command action.
@@ -296,8 +384,8 @@ def map_(player, words, skt):
     message_duration = 8000 #ms
     level = get_map(skt)
 
-    cmd = 'admin.yell "%s" %s player %s' % (level, message_duration, player)
-    command_qer(cmd)
+    cmd = 'admin.say "%s" player %s' % (level, player)
+    command_qer(cmd, 2)
 
 def kick(admin, words, skt):
     global command_q
@@ -309,23 +397,18 @@ def kick(admin, words, skt):
 
     player_name = select_player(words[1], _players, admin, skt)
 
+    msg = ' '.join(words[2:])
+
     if player_name == 1:
         return
     elif player_name == 2:
         return
     else:
-        if player_name not in admins:
-            punkb = _get_var(vars.punkBuster, skt)
-            print "********************: " + punkb
-            if _get_var('vars.punkBuster', skt) == 'false':
-                cmd = 'admin.kickPlayer %s' % player_name
-                command_qer(cmd, prio=0)
-                playeryell(admin, ['!playeryell', admin, "ADMIN: Kicking %s." % player_name], skt)
-
-            else:
-                _pb_kick(player_name)
-        else:
-            playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
+        #if player_name not in admins:
+        _kick(player_name, msg = msg)
+        _playersay(admin, "ADMIN: Kicking %s." % player_name)
+        #else:
+        #    _playersay(admin, "ADMIN: Can't kick admins.")
 
 def kicksay(admin, words, skt):
     global command_q
@@ -346,12 +429,14 @@ def kicksay(admin, words, skt):
             punkb_getter = action_pool.spawn(_get_var, 'vars.punkBuster', skt)
             punkb = punkb_getter.wait()
             if _get_var('vars.punkBuster', skt) == 'false':
-                playeryell(admin, ['!playeryell', admin, 'ADMIN: !kicksay is only available when Punkbuster is enabled'], skt)
+                playersay(admin, ['!playeryell', admin, 'ADMIN: !kicksay is only available when Punkbuster is enabled'], skt)
+                #playeryell(admin, ['!playeryell', admin, 'ADMIN: !kicksay is only available when Punkbuster is enabled'], skt)
                 return
             else:
                 _pb_kick(player_name, time=1, reason = ' '.join(words[2:]))
         else:
-            playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
+            playersay(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
+            #playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
 
 def ban(admin, words, skt):
     global command_q
@@ -382,10 +467,10 @@ def ban(admin, words, skt):
             if punkb == 'false':
                 if duration:
                     cmd = 'admin.banPlayer %s seconds %i' % (player_name, duration)
-                    command_qer(cmd)
+                    command_qer(cmd, 2)
                 else:
                     cmd = 'admin.banPlayer %s perm'
-                    command_qer(cmd)
+                    command_qer(cmd, 2)
             else:
                 if duration:
                     d = duration/60
@@ -394,9 +479,10 @@ def ban(admin, words, skt):
                     _pb_kick(player_name, d)
                 else:
                     cmd = _pb_cmd('PB_SV_Ban %s' % player_name)
-                    command_qer(cmd)
+                    command_qer(cmd, 2)
         else:
-            playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
+            playersay(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
+            #playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
 
 def unban(admin, words, skt):
     global command_q
@@ -411,7 +497,7 @@ def unban(admin, words, skt):
 
     cmd = "admin.unbanPlayer " % words[1]
     print "COMMAND: %s" % cmd
-    command_qer(cmd)
+    command_qer(cmd, 2)
 
     cmd = ""
     cmd = _pb_cmd()
@@ -420,6 +506,31 @@ def unban(admin, words, skt):
 ############################################################
 #Command helpers
 ############################################################
+def _playeryell(player, msg, seconds):
+    cmd = 'admin.yell "%s" %s player %s' % (msg, seconds*1000, player)
+    command_qer(cmd, 2, prio=1)
+
+def _serveryell(msg, seconds):
+    #Build command.  Duration is in ms
+    cmd = 'admin.yell "%s" %s all' % (msg, seconds*1000)
+
+    #insert command into command queue
+    command_qer(cmd, 2, prio=1)
+
+def _kick(player, msg = None):
+    cmd = "admin.kickPlayer %s " % player
+    if msg:
+        cmd = '%s "%s"' % (cmd, msg)
+    command_qer(cmd, 2, prio=0)
+
+def _serversay(msg):
+    cmd = 'admin.say "%s", all' % msg
+    command_qer(cmd, 2, prio = 1)
+
+def _playersay(player, msg):
+    cmd = 'admin.say "%s" player %s' % (msg, player)
+    command_qer(cmd, 2, prio=1)
+
 def countdown(msg, seconds, player, skt):
     playeryell(sys_admin, ["!playeryell", 5, "Therms", "BEGINNING COUNTDOWN"], skt)
     time.sleep(5)
@@ -436,21 +547,33 @@ def _pb_kick(player, time = 1, reason=False):
         cmd_text += " %s" % reason
 
     cmd = _pb_cmd(cmd_text)
-    command_qer(cmd)
+    command_qer(cmd, 2)
 
-def get_map(skt):
-    level = send_command_n_return("admin.currentLevel", skt)[1].split("/")[1].lower()
-    return maps[level]
+def get_map(skt, msg_level=2):
+    level = get_level(skt, msg_level=msg_level).split("/")[1].lower()
+
+    return maps.get(level, level)
+
+def get_level(skt, msg_level=2):
+    level = send_command_n_return("admin.currentLevel", msg_level, skt=skt)[1]
+    return level
 
 def get_players(skt):
     ''' '''
-    #sample=['OK', '[CIA]', 'Therms', '24', '1', '', 'cer566', '24', '2']
+    #R8sample=['OK', '[CIA]', 'Therms', '24', '1', '', 'cer566', '24', '2']
+    ''' R9sample=['OK', '9', 'clanTag', 'name', 'guid', 'teamId', 'squadId', 'kills', 'deaths', '
+        score', 'ping', '1', '[CIA]', 'Therms', 'EA_90A459A210EE309C3BD522C0B7F8A276', '
+        1', '0', '0', '0', '0', '0']
+    '''
     cmd = "admin.listPlayers all"
 
-    players = send_command_n_return(cmd, skt=skt)
+    players = send_command_n_return(cmd, 2, skt=skt)
 
-    if players[0] == 'OK':
-        players = players[1:]
+    if players[0] == 'OK' and int(players[11]) > 0:
+        fields = int(players[1])
+        players = players[12:]
+    else:
+        raise ValueError("Couldn't get players")
 
     field_count = 0
     players_output = []
@@ -458,7 +581,7 @@ def get_players(skt):
     for player in players:
         p.append(player)
         field_count += 1
-        if field_count == 4:
+        if field_count == fields:
                 field_count = 0
                 players_output.append(tuple(p))
                 p = []
@@ -505,22 +628,59 @@ def select_player(player, players, admin, skt):
 
     if len(matches) > 1:
         #Not specific enough
+        playersay(sys_admin, ['!playeryell', admin, 'ADMIN: Be more specific with playername.'], skt)
         playeryell(sys_admin, ['!playeryell', admin, 'ADMIN: Be more specific with playername.'], skt)
         return 1
     elif len(matches) == 0:
         #No matches
-        playeryell(sys_admin, ['!playeryell', admin, 'ADMIN: No matching playername.'], skt)
+        playersay(sys_admin, ['!playeryell', admin, 'ADMIN: No matching playername.'], skt)
+        #playeryell(sys_admin, ['!playeryell', admin, 'ADMIN: No matching playername.'], skt)
         return 2
     else:
         return matches[0]
+
 ############################################################
 #Connection
 ############################################################
-def _server_connect(host, port):
+def db_is_online():
+    screen_log("Database availability thread started", 2)
+    cfg = _get_mysql_config()
+    db = mysql.connector.Connect(host=cfg['host'],
+                             user=cfg['user'],
+                             password=cfg['password'],
+                             database=cfg['database'])
+    while True:
+        try:
+            cursor = db.cursor()
+            cursor.execute("select version()")
+            _ = cursor.fetchall()
+        except:
+            screen_log("LOST DB CONNECTION", 0)
+            sys.exit()
+
+        time.sleep(20)
+
+def server_is_online():
+    screen_log("Server availability  thread started", 2)
+    skt = _server_connect(host, port, timeout=5)
+    _auth(skt, pw)
+    while True:
+        try:
+            _ = send_command_n_return("version", 4, skt=skt)
+        except:
+            screen_log("SERVER CONNECTION LOST", 0)
+            log_q.put("SERVER CONNECTION LOST")
+            sys.exit()
+
+        time.sleep(20)
+
+def _server_connect(host, port, timeout=None):
     ''' Connects to a server and returns the socket
     '''
     #open socket
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if timeout:
+        server_socket.settimeout(5)
     server_socket.connect((host, port))
     return server_socket
 
@@ -528,7 +688,7 @@ def _auth(skt, pw):
     ''' Authenticates to server on socket
     '''
     # Retrieve this connection's 'salt'
-    words = _send_command(skt, "login.hashed")
+    words = _send_command(skt, "login.hashed", 2)
 
     # Given the salt and the password, combine them and compute hash value
     salt = words[1].decode("hex")
@@ -536,7 +696,7 @@ def _auth(skt, pw):
     pw_hash_encoded = pw_hash.encode("hex").upper()
 
     # Send password hash to server
-    words = _send_command(skt, "login.hashed " + pw_hash_encoded)
+    words = _send_command(skt, "login.hashed " + pw_hash_encoded, 2)
 
     # if the server didn't like our password, abort
     if words[0] != "OK":
@@ -544,7 +704,7 @@ def _auth(skt, pw):
 
     return skt
 
-def _send_command(skt, cmd):
+def _send_command(skt, cmd, msg_level):
     ''' Send cmd over skt.
     '''
     global client_seq_number #maintain seqence numbers
@@ -554,7 +714,7 @@ def _send_command(skt, cmd):
 
     skt.send(request)
 
-    screen_log("CMD SENT: %s" % cmd, 3)
+    screen_log("CMD SENT: %s" % cmd, msg_level)
 
     # Wait for response from server
     packet = skt.recv(4096)
@@ -566,9 +726,9 @@ def _send_command(skt, cmd):
     return words
 
 def _set_receive_events(skt):
-    _send_command(skt, "eventsEnabled true")
+    _send_command(skt, "eventsEnabled true", 2)
 
-def send_command_n_return(cmd, skt=None):
+def send_command_n_return(cmd, msg_level, skt=None):
     ''' Sends a command to the command queue and optionally waits for
         a return.  This is a more expensive option than _send_command
         since we open a new socket.
@@ -582,19 +742,19 @@ def send_command_n_return(cmd, skt=None):
         temp_socket = skt
         own_socket = False
 
-    words = _send_command(temp_socket, cmd)
+    words = _send_command(temp_socket, cmd, msg_level)
 
     if own_socket:
-        _send_command(temp_socket, "quit")
+        _send_command(temp_socket, "quit", msg_level)
 
     return words
 
 ############################################################
 #Producers
 ############################################################
-def command_qer(cmd, prio=2):
+def command_qer(cmd, msg_level, prio=2):
     global command_q
-    command_q.put((prio,cmd))
+    command_q.put((prio, cmd, msg_level))
     screen_log("COMMAND QUEUED: %s" % cmd, 2)
 
 def event_logger_qer(event, recv_time):
@@ -654,13 +814,11 @@ def find_blank_playername(cursor):
             try:
                 cursor.execute(stmt_select)
             except:
-                import pdb; pdb.set_trace()
+                return 0
             results = cursor.fetchall()
             if len(results) == 0:
                 screen_log("Found blank playername %s" % player, 2)
-                if player != None:
-                    if player != "None":
-                        return player
+                return player
             screen_log("%s isn't the blank playername" % player, 3)
 
         time.sleep(1)
@@ -669,34 +827,86 @@ def find_blank_playername(cursor):
 ############################################################
 #Misc
 ############################################################
+def get_supported_maps(playlist, skt):
+    cmd = "admin.supportedMaps %s" % playlist.upper()
+    maps = send_command_n_return(cmd, 2, skt=skt)
+    return maps[1:]
+
+def change_playlist(playlist, skt):
+    cmd = "admin.setPlaylist %s" % playlist.upper()
+    _send_command(skt, cmd, 2)
+    return
+
+def append_map(map, skt):
+    cmd = 'mapList.append "%s"' % map
+    _send_command(skt, cmd, 2)
+    return
+
+def clear_maplist(skt):
+    cmd = 'mapList.clear'
+    _send_command(skt, cmd, 2)
+    return
+
+def change_maplist(maps, skt):
+    clear_maplist(skt)
+    for m in maps:
+        append_map(m, skt)
+
 def server_manager():
     global mix_conquest_rush
     our_skt = _server_connect(host, port)
     _auth(our_skt, pw)
     screen_log("Server manager thread started", 2)
-    map = send_command_n_return("admin.currentLevel", skt=our_skt)
-    gamemode = send_command_n_return("admin.getPlaylist", skt=our_skt)
-    gamemodes = ['rush', 'conquest']
+
+    gamemodes = ['RUSH', 'CONQUEST']
+    gamemode_maps = dict.fromkeys(gamemodes)
+
+    #get maps supported for each gamemode
+    for gm in gamemode_maps:
+        gamemode_maps[gm] = {}
+        gamemode_maps[gm]['maps'] = []
+        gamemode_maps[gm]['last_played'] = 0
+        supported_maps = get_supported_maps(gm, our_skt)
+        random.shuffle(supported_maps)
+
+        gamemode_maps[gm]['maps'] = supported_maps
+
     while True:
-        curr_map = get_map(our_skt)
-        curr_map_gamemode = re.search(r"\(\w+\)", curr_map).group()[1:-1].lower()
-        curr_gamemode_setting = send_command_n_return("admin.getPlaylist", our_skt)[1].lower()
+        try:
+            curr_map = get_level(our_skt, msg_level=4)
+            for gm in gamemode_maps:
+                if curr_map in gamemode_maps[gm]['maps']:
+                    curr_map_gamemode = gm
+            curr_gamemode_setting = send_command_n_return("admin.getPlaylist", 4, our_skt)[1]
 
-        if mix_conquest_rush:
-            screen_log("Checking if gamemode needs switched (map: %s, map mode: %s, mode setting: %s)" % (curr_map, curr_map_gamemode, curr_gamemode_setting), 3)
-            #if our current gamemode is the same as the gamemode of the map we're playing, change it
-            if curr_map_gamemode == curr_gamemode_setting:
-                gamemode_options = list(gamemodes)
+            if mix_conquest_rush:
+                screen_log("Checking if gamemode needs switched (map: %s, map mode: %s, mode setting: %s)" % (curr_map, curr_map_gamemode, curr_gamemode_setting), 4)
+                #if our current gamemode is the same as the gamemode of the map we're playing, change it
+                if curr_map_gamemode.lower() == curr_gamemode_setting.lower():
+                    gamemode_options = list(gamemodes)
 
-                #remove our current gamemode setting from our options
-                gamemode_options.pop(gamemode_options.index(curr_gamemode_setting))
+                    #remove our current gamemode setting from our options
+                    gamemode_options.pop(gamemode_options.index(curr_gamemode_setting))
 
-                #set gamemode to a random choice from our gamemode options
-                new_gamemode = random.choice(gamemode_options)
-                screen_log("Changing gamemode type to %s" % new_gamemode, 2)
-                ret = send_command_n_return("admin.setPlaylist %s" % new_gamemode, skt=our_skt)
-                if ret[0] != 'OK':
-                    screen_log("ERROR SETTING GAMEMODE", 1)
+                    #set gamemode to a random choice from our gamemode options
+                    new_gamemode = random.choice(gamemode_options)
+                    screen_log("Changing gamemode type to %s" % new_gamemode, 2)
+                    change_playlist(new_gamemode, our_skt)
+                    level = send_command_n_return("admin.currentLevel", 2, skt=our_skt)[1]
+                    gamemode_maps[curr_map_gamemode.upper()]['last_played'] = gamemode_maps[curr_map_gamemode]['maps'].index(level)
+
+                    #build new maplist
+                    new_gamemode_maps = gamemode_maps[new_gamemode]['maps']
+                    new_gamemode_lastp = gamemode_maps[new_gamemode]['last_played']
+                    new_maplist = new_gamemode_maps[new_gamemode_lastp+1:]
+                    new_maplist.extend(new_gamemode_maps[:new_gamemode_lastp+1])
+
+                    #send new maplist to server
+                    clear_maplist(our_skt)
+                    change_maplist(new_maplist, our_skt)
+
+        except:
+            screen_log("server_manager thread died")
         time.sleep(10)
 
 def _get_var(var, skt):
@@ -712,6 +922,7 @@ def screen_log(msg, level=3):
                 1:  Error
                 2:  Info
                 3:  High Volume messages
+                4:  Super high volume messages
     '''
     #level 0 = critical
 
@@ -747,6 +958,7 @@ def create_tables():
                   player VARCHAR(50),
                   ip VARCHAR(15),
                   pb_guid VARCHAR(50),
+                  ea_guid VARCHAR(50),
                   jointime DATETIME,
                   leavetime DATETIME,
                   PRIMARY KEY (id))
@@ -781,6 +993,7 @@ def create_tables():
                   PRIMARY KEY(id))
                   """)
     cfg = _get_mysql_config()
+
     db = mysql.connector.Connect(host=cfg['host'],
                              user=cfg['user'],
                              password=cfg['password'],
@@ -802,7 +1015,8 @@ client_seq_number = 0
 
 if __name__ == '__main__':
     #config
-    host = "75.102.38.3"
+    host = "68.232.176.204"
+    #host="75.102.38.3"
     port = 48888
     pw = open("config/password").read().strip()
     admins = open("config/admins").read().split("\n")
@@ -812,6 +1026,7 @@ if __name__ == '__main__':
     maps = {"mp_001": "Panama Canal (Conquest)",
             "mp_003": "Laguna Alta (Conquest)",
             "mp_005": "Atacama Desert (Conquest)",
+            "mp_006cq": "Arica Harbor (Conquest)",
             "mp_007": "White Pass (Conquest)",
             "mp_009cq": "Laguna Presa (Conquest)",
             "mp_002": "Valparaiso (Rush)",
@@ -838,8 +1053,11 @@ if __name__ == '__main__':
     #event logging queue
     event_log_q = eventlet.Queue()
 
-    #command return queue
+    #btps log queue
     log_q = eventlet.Queue()
+
+    #thread management queue
+    thread_q = eventlet.Queue()
 
     #dictionary of commands with their functions
     cmds = {"!serveryell": serveryell,
@@ -848,7 +1066,9 @@ if __name__ == '__main__':
             "!kick": kick,
             "!kicksay": kicksay,
             "!ban": ban,
-            "!gonext": gonext}
+            "!gonext": gonext,
+            "!playersay": playersay,
+            "!serversay": serversay}
 
     #establish connection for event stream
     event_socket = _server_connect(host, port)
@@ -859,15 +1079,17 @@ if __name__ == '__main__':
     command_socket = _server_connect(host, port)
     _auth(command_socket, pw)
 
-    #spawn counsumer threads
+    #spawn threads
+    #action_pool.spawn_n(thread_manager)
     action_pool.spawn_n(command_processor)
     action_pool.spawn_n(event_logger)
     action_pool.spawn_n(log_processor)
     action_pool.spawn_n(server_manager)
+    #action_pool.spawn_n(db_is_online)
+    #action_pool.spawn_n(server_is_online)
 
     #countdown("HEYHEY", 10, "Therms", command_socket)
     #action_pool.spawn_n(countdown, "Partytime in", 10, "Therms", command_socket)
-
 
     while True:
         #get packet
@@ -880,6 +1102,7 @@ if __name__ == '__main__':
                 response = bc2_misc._encode_resp(sequence, ["OK"])
                 event_socket.send(response)
         except:
+
             continue
 
         if len(words) > 0:
@@ -891,22 +1114,20 @@ if __name__ == '__main__':
             #process event
             if words[0] == 'player.onChat':
                 try:
-                    chat_words = shlex.split(words[2])
+                    chat_words = re.sub("'", "", words[2])
+                    chat_words = re.sub('"', "", chat_words)
+                    chat_words = shlex.split(chat_words)
                 except:
                     continue
 
                 talker = words[1]
                 potential_cmd = chat_words[0].lower()
+
+                if potential_cmd[0] == "/":
+                    #bc2 hides chat text that starts with a "/" so
+                    #we'll use that as an alternate command prefix
+                    potential_cmd = "!" + potential_cmd[1:]
+
                 if potential_cmd in cmds:
                     #send command to the appropriate function
                     cmds[potential_cmd](talker, chat_words, command_socket)
-            if words[0] == 'player.onJoin':
-                pass
-            if words[0] == 'player.onLeave':
-                pass
-            if words[0] == 'player.onKill':
-                pass
-            if words[0] == 'punkBuster.onMessage':
-                pass
-        else:
-            continue
