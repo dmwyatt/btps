@@ -13,15 +13,19 @@ Store rcon password in config/password.
 IN-GAME COMMANDS
 -----------------------------------
 - 	Replace the "!" with "/" to hide the text you type from other players.
+
 - 	Commands which accept "playername" also accept partial player names.
+
 - 	Commands involving messaging don't require the message or the playername to
 	be in quotes unless the part of the playername you're typing contains a space.
+	
 - 	Commands with optional arguments like duration can include the argument anywhere after 
 	playername.  For example the following two commands are equivalent and 
 	they tempban "player" for 600 seconds.
 		!ban player Because you're a teamkiller. d=600
 		!ban player Because you're a d=600 teamkiller.
 	The "d=600" is automatically stripped from the message text.
+	
 -	Optional arguments:
 		"d=xx" - duration in seconds		
 
