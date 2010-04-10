@@ -758,7 +758,9 @@ def _send_command(skt, cmd, msg_level):
     screen_log("CMD SENT: %s" % cmd, msg_level)
 
     # Wait for response from server
-    packet = skt.recv(4096)
+    recv_buffer = ''
+    [packet, recv_buffer] = bc2_misc.recv_pkt(skt, recv_buffer)
+    #packet = skt.recv(4096)
     _, is_response, _, words = bc2_misc._decode_pkt(packet)
 
     if not is_response:
@@ -1141,9 +1143,12 @@ if __name__ == '__main__':
 
     event_msg_prio = 2
 
+    recv_buffer = ''
+
     while True:
         #get packet
-        packet = event_socket.recv(4096)
+        #packet = event_socket.recv(4096)
+        [packet, recv_buffer] = bc2_misc.recv_pkt(event_socket, recv_buffer)
         try:
             #decode packet
             _, is_response, sequence, words = bc2_misc._decode_pkt(packet)

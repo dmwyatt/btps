@@ -75,3 +75,25 @@ def _decode_words(size, data):
 
 def _encode_resp(sequence, words):
 	return _encode_pkt(False, True, sequence, words)
+
+def _contains_complete_pkt(data):
+    if len(data) < 8:
+        return False
+
+    if len(data) < _decode_int32(data[4:8]):
+        return False
+    return True
+
+# Wait until the local receive buffer contains a full packet (appending data from the network socket),
+# then split receive buffer into first packet and remaining buffer data
+
+def recv_pkt(socket, receiveBuffer):
+    while not _contains_complete_pkt(receiveBuffer):
+        receiveBuffer += socket.recv(4096)
+
+    packetSize = _decode_int32(receiveBuffer[4:8])
+
+    packet = receiveBuffer[0:packetSize]
+    receiveBuffer = receiveBuffer[packetSize:len(receiveBuffer)]
+
+    return [packet, receiveBuffer]
