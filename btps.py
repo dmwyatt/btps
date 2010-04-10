@@ -41,7 +41,7 @@ def thread_manager():
 
 def test_thread():
     global thread_q
-    screen_log("Test thread started")
+    screen_log("Test thread started", 1)
     time.sleep(10)
     thread_q.put("test_thread")
     return
@@ -59,7 +59,6 @@ def log_processor():
                              database=cfg['database'])
     cursor = db.cursor()
 
-    print "ENTERING LOG LOOP"
     while True:
         #loop waiting for log messages
         if log_q.empty():
@@ -83,8 +82,6 @@ def command_processor():
     global command_socket
     global command_q
     screen_log("Command processor thread started", 2)
-    print "ENTERING CMD LOOP"
-
 
     while True:
         if command_q.empty():
@@ -105,10 +102,7 @@ def event_logger():
     screen_log("Event logger thread started", 2)
 
     #Make sure our tables exist
-    try:
-        create_tables()
-    except:
-        print "TABLE FAIL"
+    create_tables()
 
     cfg = _get_mysql_config()
     db = mysql.connector.Connect(host=cfg['host'],
@@ -120,8 +114,10 @@ def event_logger():
     event_error = False
 
     while True:
+        #log any errors
         if event_error:
             log_q.put(event_error)
+            screen_log(event_error, 1)
             event_error = False
 
         #loop waiting for events
@@ -129,113 +125,134 @@ def event_logger():
             time.sleep(.1)
             continue
 
+        #fetch event from queue
         evt = event_log_q.get()
 
+        #format time
         recv_time = evt[1].strftime("%Y-%m-%d %H:%M:%S")
 
         #we only care about [0] from now on
         evt = evt[0]
 
-        #screen_log("EVENT: %s" % evt)
         if evt[0] == 'player.onChat':
             #log chat
-            screen_log("player.onChat - %s: %s" % (evt[1], evt[2]), 2)
-            stmt_insert = "INSERT INTO bc2_chat (dt, player, chat) VALUES (%s, %s, %s)"
+            sql = "INSERT INTO bc2_chat (dt, player, chat) VALUES (%s, %s, %s)"
             try:
-                cursor.execute(stmt_insert, (recv_time, evt[1], evt[2]))
+                cursor.execute(sql, (recv_time, evt[1], evt[2]))
                 db.commit()
+                screen_log("EVT_LOGGED: player.onChat - %s: %s" % (evt[1], evt[2]), 3)
             except:
-                event_error = "Error executing: %s" % stmt_insert % (recv_time, evt[1], evt[2])
+                import pdb; pdb.set_trace()
+                event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1], evt[2])
+
 
         elif evt[0] == 'player.onJoin':
             #Do things for when player joins server
-            stmt_insert = "INSERT INTO bc2_connections (player, jointime) VALUES (%s, %s)"
+            sql = "INSERT INTO bc2_connections (player, jointime) VALUES (%s, %s)"
             if evt[1] == '':
-                #sometimes this event returns '', so use alt-method of guessing players name
-                #player = find_blank_playername(cursor)
-                #screen_log("player.onJoin - %s" % player, 2)
-                #try:
-                #    cursor.execute(stmt_insert, (player, recv_time))
-                #    db.commit()
-                #    log_q.put("Found blank playername: %s" % player)
-                #except:
-                #    log_q.put("Error executing: %s" % stmt_insert % (player, recv_time))
+                event_error = "Blank player name"
                 pass
             else:
                 #log new connection
-                screen_log("player.onJoin - %s" % evt[1], 2)
-                #try:
-                #    cursor.execute(stmt_insert, (evt[1], recv_time))
-                #    db.commit()
-                #except:
-                #    event_error = "Error executing: %s" % stmt_insert % (evt[1], recv_time)
+                #screen_log("player.onJoin - %s" % evt[1], 3)
                 pass
 
         elif evt[0] == 'player.onAuthenticated':
             #Since player.onJoin sometimes give empty playernames, we're just
             #going to start using onAuthenticated
-            screen_log("player.onAuthenticated - %s" % evt[1])
-            stmt_insert = "INSERT INTO bc2_connections (player, jointime, ea_guid) VALUES (%s, %s, %s)"
+            sql = "INSERT INTO bc2_connections (player, jointime, ea_guid) VALUES (%s, %s, %s)"
             try:
-                cursor.execute(stmt_update, (evt[1], recv_time, evt[2]))
+                cursor.execute(sql, (evt[1], recv_time, evt[2]))
                 db.commit()
+                screen_log("EVT_LOGGED: player.onAuthenticated - %s" % evt[1], 3)
             except:
-                event_error = "Error executing: %s" % stmt_update % (evt[2], evt[1])
+                import pdb; pdb.set_trace()
+                event_error = "Error executing SQL: %s" % sql % (evt[2], evt[1])
 
 
         elif evt[0] == 'player.onLeave':
             #Do things for when player leaves server
-            screen_log("player.onLeave - %s" % evt[1], 2)
             #log disconnect
-            stmt_update = """UPDATE bc2_connections
+            sql = """UPDATE bc2_connections
                                 SET leavetime=%s
                                 WHERE player=%s
                                 AND leavetime is NULL
                                 AND %s > jointime"""
             try:
-                cursor.execute(stmt_update, (recv_time, evt[1], recv_time))
+                cursor.execute(sql, (recv_time, evt[1], recv_time))
                 db.commit()
+                screen_log("EVT_LOGGED: player.onLeave - %s" % evt[1], 3)
             except:
-                event_error = "Error executing: %s" % stmt_update % (recv_time, evt[1], recv_time)
+                import pdb; pdb.set_trace()
+                event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1], recv_time)
 
 
         elif evt[0] == 'player.onKill':
-            screen_log("player.onKill - %s killed %s" % (evt[1], evt[2]), 3)
-            stmt_insert = "INSERT INTO bc2_kills (dt, victim, killer) VALUES (%s, %s, %s)"
+            sql = "INSERT INTO bc2_kills (dt, victim, killer) VALUES (%s, %s, %s)"
             try:
-                cursor.execute(stmt_insert, (recv_time, evt[2], evt[1]))
+                cursor.execute(sql, (recv_time, evt[2], evt[1]))
                 db.commit()
+                screen_log("EVT_LOGGED: player.onKill - %s killed %s" % (evt[1], evt[2]), 3)
             except:
-                event_error = "Error executing: %s" % stmt_insert % (recv_time, evt[2], evt[1])
+                import pdb; pdb.set_trace()
+                event_error = "Error executing SQL: %s" % sql % (recv_time, evt[2], evt[1])
 
 
         elif evt[0] == 'punkBuster.onMessage':
-            screen_log(r"punkBuster.onMessage: %s" % evt[1], 2)
+            #import pdb; pdb.set_trace()
             if is_pb_new_connection(evt[1]):
                 try:
                     name, ip = parse_pb_new_connection(evt[1])
-                    stmt_update = "UPDATE bc2_connections SET ip=%s WHERE player=%s AND leavetime IS NULL"
-                    cursor.execute(stmt_update, (ip, name))
-                    db.commit()
+                    parsed = True
                 except:
-                    screen_log("ERROR:  Can't parse punkbuster lost connection msg.", 1)
+                    import pdb; pdb.set_trace()
+                    log_q.put("ERROR:  Can't parse punkbuster new connection msg (%s)." % evt[1])
+                    screen_log("ERROR: Can't parse %s" % evt[1])
+                    parsed = False
+
+                if parsed:
+                    sql = "UPDATE bc2_connections SET ip=%s WHERE player=%s AND leavetime IS NULL"
+                    try:
+                        cursor.execute(sql, (ip, name))
+                        db.commit()
+                        screen_log(r"EVT_LOGGED: punkBuster.onMessage: %s" % evt[1], 3)
+                    except:
+                        import pdb; pdb.set_trace()
+                        event_error = "Error executing SQL: %s" % sql % (ip, name)
+                        print event_error
+                        import pdb; pdb.set_trace()
 
             elif is_pb_lost_connection(evt[1]):
                 try:
                     name, pb_guid = parse_pb_lost_connection(evt[1])
-                    stmt_update = "UPDATE bc2_connections SET pb_guid=%s WHERE player=%s and pb_guid IS NULL"
-                    cursor.execute(stmt_update, (pb_guid, name))
-                    db.commit()
+                    parsed = True
                 except:
-                    screen_log("ERROR:  Can't parse punkbuster lost connection msg.", 1)
+                    import pdb; pdb.set_trace()
+                    log_q.put("ERROR:  Can't parse punkbuster lost connection msg (%s)." % evt[1])
+                    screen_log("ERROR: Can't parse %s" % evt[1])
+                    parsed = False
+
+                if parsed:
+                    sql = "UPDATE bc2_connections SET pb_guid=%s WHERE player=%s and pb_guid IS NULL"
+                    try:
+                        cursor.execute(sql, (pb_guid, name))
+                        db.commit()
+                        screen_log(r"EVT_LOGGED: punkBuster.onMessage: %s" % evt[1], 3)
+                    except:
+                        import pdb; pdb.set_trace()
+                        event_error = "Error executing SQL: %s" % sql % (pb_guid, name)
+                        print event_error
+                        import pdb; pdb.set_trace()
 
             #log punkbuster messages
-            stmt_insert = "INSERT INTO bc2_punkbuster (dt, punkbuster) VALUES (%s, %s)"
+            sql = "INSERT INTO bc2_punkbuster (dt, punkbuster) VALUES (%s, %s)"
             try:
-                cursor.execute(stmt_insert, (recv_time, evt[1]))
+                cursor.execute(sql, (recv_time, evt[1]))
                 db.commit()
+                screen_log(r"EVT_LOGGED: punkBuster.onMessage: %s" % evt[1], 3)
             except:
-                event_error = "Error executing: %s" % stmt_insert % (recv_time, evt[1])
+                import pdb; pdb.set_trace()
+                event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1])
         else:
             pass
 
@@ -245,12 +262,7 @@ def event_logger():
 def serversay(admin, words, skt):
     ''' Command action.
         Words should be a list formatted like:
-            duration included:
-                ["!serveryell", seconds, "message"]
-            duration not included:
-                ["!serveryell", "message"]
-
-        If duration isn't included we default to 4 seconds.
+            ["!serversay", "message"]
     '''
     if admin not in admins:
         return
@@ -266,12 +278,7 @@ def serversay(admin, words, skt):
 def playersay(admin, words, skt):
     ''' Command action.
         Words should be a list formatted like:
-            duration included:
-                ["!playeryell", seconds, "playername", "message"]
-            duration not included:
-                ["!playeryell", "playername", "message"]
-
-        If duration isn't included we default to 4 seconds.
+            ["!playeryell", "playername", "message"]
     '''
     global command_q
 
@@ -293,39 +300,38 @@ def playersay(admin, words, skt):
 def serveryell(admin, words, skt):
     ''' Command action.
         Words should be a list formatted like:
-            duration included:
-                ["!serveryell", seconds, "message"]
-            duration not included:
-                ["!serveryell", "message"]
+            ["!serveryell", "message", "words", "are", "split", "or", "not"]
 
         If duration isn't included we default to 4 seconds.
     '''
     if admin not in admins:
         return
 
-    if len(words) < 2:
+    default_duration = 4
+
+    print _get_variable(shlex.split("text var=whatup more text"), 'var')
+
+    if len(words) < 1:
         _playersay(admin, 'ADMIN: Must specify text to yell.')
         return
 
+    parsed = _get_variable(words, 'd')
 
-    if words[1][:4] == "dur=":
-        try:
-            seconds = int(words[1][4:])
-            msg = ' '.join(words[2:])
-        except:
-            seconds = 4
-            msg = ' '.join(words[1:])
+    if parsed:
+        msg = ' '.join(parsed[0][1:])
+        seconds = int(parsed[1])
     else:
-        seconds = 4
         msg = ' '.join(words[1:])
+        seconds = default_duration
 
     _serveryell(msg, seconds)
+
 
 def playeryell(admin, words, skt):
     ''' Command action.
         Words should be a list formatted like:
             duration included:
-                ["!playeryell", "playername", "dur=seconds", "message"]
+                ["!playeryell", "playername", "d=seconds message"]
             duration not included:
                 ["!playeryell", "playername", "message"]
 
@@ -338,16 +344,20 @@ def playeryell(admin, words, skt):
 
     player = words[1]
 
-    if words[2][:4] == "dur=":
-        try:
-            seconds = int(words[2][4:])
-            msg = ' '.join(words[3:])
-        except:
-            seconds = 4
-            msg = ' '.join(words[2:])
+    default_duration = 4
+
+    if len(words) < 1:
+        _playersay(admin, 'ADMIN: Must specify text to yell.')
+        return
+
+    parsed = _get_variable(words, 'd')
+
+    if parsed:
+        msg = ' '.join(parsed[0][2:])
+        seconds = int(parsed[1])
     else:
-        seconds = 4
         msg = ' '.join(words[2:])
+        seconds = default_duration
 
     player_name = select_player(player, get_players_names(skt), admin, skt)
 
@@ -356,7 +366,14 @@ def playeryell(admin, words, skt):
     elif player_name == 2:
         return
     else:
-        _playeryell(player_name, msg, seconds)
+        try:
+            _playeryell(player_name, msg, seconds)
+        except:
+            _playersay(admin, "Msg failed")
+            return
+        _playersay(admin, "Msg sent")
+
+
 
 def gonext(admin, words, skt):
     ''' Command action.
@@ -388,8 +405,6 @@ def map_(player, words, skt):
     command_qer(cmd, 2)
 
 def kick(admin, words, skt):
-    global command_q
-
     if admin not in admins:
         return
 
@@ -439,50 +454,37 @@ def kicksay(admin, words, skt):
             #playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
 
 def ban(admin, words, skt):
-    global command_q
-
     if admin not in admins:
         return
 
-    try:
-        duration = int(words[1])
-    except:
-        duration = 0
-
     _players = get_players_names(skt)
 
-    if duration:
-        player_name = select_player(words[2], _players, admin, skt)
+    player_name = select_player(words[1], _players, admin, skt)
+
+    parsed = _get_variable(words, 'd')
+
+    if parsed:
+        msg = ' '.join(parsed[0][2:])
+        duration = int(parsed[1])
     else:
-        player_name = select_player(words[1], _players, admin, skt)
+        msg = ' '.join(words[2:])
+        duration = 'perm'
 
     if player_name == 1:
         return
     elif player_name == 2:
         return
     else:
-        if player_name not in admins:
-            punkb_getter = action_pool.spawn(_get_var, 'vars.punkBuster', skt)
-            punkb = punkb_getter.wait()
-            if punkb == 'false':
-                if duration:
-                    cmd = 'admin.banPlayer %s seconds %i' % (player_name, duration)
-                    command_qer(cmd, 2)
-                else:
-                    cmd = 'admin.banPlayer %s perm'
-                    command_qer(cmd, 2)
-            else:
-                if duration:
-                    d = duration/60
-                    if d < 1:
-                        d = 1
-                    _pb_kick(player_name, d)
-                else:
-                    cmd = _pb_cmd('PB_SV_Ban %s' % player_name)
-                    command_qer(cmd, 2)
+        if player_name != 'cock':#in admins:
+            _ban(player_name, msg=msg, duration=duration)
+            #if duration != 'perm':
+            #    cmd = 'admin.banPlayer %s seconds %i' % (player_name, duration)
+            #    command_qer(cmd, 2)
+            #else:
+            #    cmd = 'admin.banPlayer %s perm'
+            #    command_qer(cmd, 2)
         else:
-            playersay(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
-            #playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
+            _playersay(admin, "ADMIN: Can't ban admins.")
 
 def unban(admin, words, skt):
     global command_q
@@ -506,6 +508,27 @@ def unban(admin, words, skt):
 ############################################################
 #Command helpers
 ############################################################
+def _get_variable(msg_words, variable):
+    ''' Checks list of words for variable=x and returns (msg with variable=x stripped, x)
+        or False.
+    '''
+    for i in range(len(msg_words)):
+        found = False
+        if msg_words[i][:len(variable)+1] == "%s=" % variable:
+            try:
+                value = msg_words[i][len(variable)+1:]
+                found = True
+                break
+            except:
+                pass
+
+    if not found:
+        return False
+
+    msg_words.pop(i)
+
+    return msg_words, value
+
 def _playeryell(player, msg, seconds):
     cmd = 'admin.yell "%s" %s player %s' % (msg, seconds*1000, player)
     command_qer(cmd, 2, prio=1)
@@ -521,7 +544,25 @@ def _kick(player, msg = None):
     cmd = "admin.kickPlayer %s " % player
     if msg:
         cmd = '%s "%s"' % (cmd, msg)
+
+    _serversay("Kicking: %s" % player)
     command_qer(cmd, 2, prio=0)
+
+
+def _ban(player, msg = None, duration = "perm"):
+    cmd = "banList.add name %s" % player
+    if duration == "perm":
+        cmd = "%s perm" % cmd
+        server_msg = "Permaban: %s" % player
+    else:
+        cmd = "%s seconds %s" % (cmd, duration)
+        server_msg = "Tempban: %s" % player
+    if msg:
+        cmd = '%s "%s"' % (cmd, msg)
+
+    _serversay(server_msg)
+    command_qer(cmd, 2, prio=0)
+
 
 def _serversay(msg):
     cmd = 'admin.say "%s", all' % msg
@@ -762,7 +803,12 @@ def event_logger_qer(event, recv_time):
     '''
     global event_log_q
     event_log_q.put((event, recv_time))
-    screen_log("EVENT QUEUED: %s (approx. total queued: %i)" % (words[0], event_log_q.qsize()), 3)
+
+    qs = event_log_q.qsize()
+    if qs > 5:
+        msg = "EVENT QUEUE SIZE: %s" % qs
+        screen_log(msg, 3)
+        log_q.put(msg)
 
 ############################################################
 #Event handling
@@ -906,7 +952,9 @@ def server_manager():
                     change_maplist(new_maplist, our_skt)
 
         except:
-            screen_log("server_manager thread died")
+            screen_log("error in game mode mixer")
+            log_q.put("error in game mode mixer")
+
         time.sleep(10)
 
 def _get_var(var, skt):
@@ -1091,6 +1139,8 @@ if __name__ == '__main__':
     #countdown("HEYHEY", 10, "Therms", command_socket)
     #action_pool.spawn_n(countdown, "Partytime in", 10, "Therms", command_socket)
 
+    event_msg_prio = 2
+
     while True:
         #get packet
         packet = event_socket.recv(4096)
@@ -1107,6 +1157,7 @@ if __name__ == '__main__':
 
         if len(words) > 0:
             recv_time = datetime.datetime.now()
+            screen_log("EVT_RECV: %s" % words, event_msg_prio)
 
             #send event to the event processor queue for logging
             event_logger_qer(words, recv_time)

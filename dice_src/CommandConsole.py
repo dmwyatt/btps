@@ -91,7 +91,31 @@ def EncodeClientRequest(words):
 # Encode a response packet
 	
 def EncodeClientResponse(sequence, words):
-	return EncodePacket(False, True, sequence, words)
+	return EncodePacket(True, True, sequence, words)
+
+###################################################################################
+
+def containsCompletePacket(data):
+	if len(data) < 8:
+		return False
+	if len(data) < DecodeInt32(data[4:8]):
+		return False
+	return True
+
+# Wait until the local receive buffer contains a full packet (appending data from the network socket),
+# then split receive buffer into first packet and remaining buffer data
+	
+def receivePacket(socket, receiveBuffer):
+
+	while not containsCompletePacket(receiveBuffer):
+		receiveBuffer += socket.recv(4096)
+
+	packetSize = DecodeInt32(receiveBuffer[4:8])
+
+	packet = receiveBuffer[0:packetSize]
+	receiveBuffer = receiveBuffer[packetSize:len(receiveBuffer)]
+
+	return [packet, receiveBuffer]
 
 ###################################################################################
 
@@ -126,7 +150,6 @@ def generatePasswordHash(salt, password):
 	m.update(password)
 	return m.digest()
 
-
 ###################################################################################
 # Example program
 
@@ -142,6 +165,8 @@ if __name__ == '__main__':
 	host = raw_input('Enter game server host IP/name: ')
 	port = int(raw_input('Enter host port: '))
 	pw = raw_input('Enter password: ')
+
+	receiveBuffer = ""
 
 	serverSocket = None
 	running = True
@@ -178,7 +203,7 @@ if __name__ == '__main__':
 				getPasswordSaltRequest = EncodeClientRequest( [ "login.hashed" ] )
 				serverSocket.send(getPasswordSaltRequest)
 
-				getPasswordSaltResponse = serverSocket.recv(4096)
+				[getPasswordSaltResponse, receiveBuffer] = receivePacket(serverSocket, receiveBuffer)
 				printPacket(DecodePacket(getPasswordSaltResponse))
 
 				[isFromServer, isResponse, sequence, words] = DecodePacket(getPasswordSaltResponse)
@@ -202,7 +227,7 @@ if __name__ == '__main__':
 				loginRequest = EncodeClientRequest( [ "login.hashed", passwordHashHexString ] )
 				serverSocket.send(loginRequest)
 
-				loginResponse = serverSocket.recv(4096)	
+				[loginResponse, receiveBuffer] = receivePacket(serverSocket, receiveBuffer)
 				printPacket(DecodePacket(loginResponse))
 
 				[isFromServer, isResponse, sequence, words] = DecodePacket(loginResponse)
@@ -225,7 +250,7 @@ if __name__ == '__main__':
 					serverSocket.send(request)
 
 					# Wait for response from server
-					packet = serverSocket.recv(4096)	
+					[packet, receiveBuffer] = receivePacket(serverSocket, receiveBuffer)
 
 					[isFromServer, isResponse, sequence, words] = DecodePacket(packet)
 

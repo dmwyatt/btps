@@ -8,6 +8,12 @@ import string
 import threading
 import os
 
+# This is an example program which shows game server events.
+# It logs in to the game server, enables eventa, and then prints out any events received (and responds to them).
+
+###############################################################################
+
+# Packet encoding/decoding helper functions
 
 def EncodeHeader(isFromServer, isResponse, sequence):
 	header = sequence & 0x3fffffff
@@ -89,7 +95,7 @@ def EncodeClientRequest(words):
 # Encode a response packet
 	
 def EncodeClientResponse(sequence, words):
-	return EncodePacket(False, True, sequence, words)
+	return EncodePacket(True, True, sequence, words)
 
 
 ###################################################################################
@@ -123,7 +129,31 @@ def generatePasswordHash(salt, password):
 	m.update(salt)
 	m.update(password)
 	return m.digest()
+
+###################################################################################
+
+def containsCompletePacket(data):
+	if len(data) < 8:
+		return False
+	if len(data) < DecodeInt32(data[4:8]):
+		return False
+	return True
+
+# Wait until the local receive buffer contains a full packet (appending data from the network socket),
+# then split receive buffer into first packet and remaining buffer data
 	
+def receivePacket(socket, receiveBuffer):
+
+	while not containsCompletePacket(receiveBuffer):
+		receiveBuffer += socket.recv(4096)
+
+	packetSize = DecodeInt32(receiveBuffer[4:8])
+
+	packet = receiveBuffer[0:packetSize]
+	receiveBuffer = receiveBuffer[packetSize:len(receiveBuffer)]
+
+	return [packet, receiveBuffer]
+
 ###################################################################################
 # Example program
 
@@ -133,6 +163,8 @@ if __name__ == '__main__':
 
 	print "Remote administration event listener for BFBC2"
 #	history_file = os.path.join( os.environ["HOME"], ".bfbc2_rcon_history" )
+
+	receiveBuffer = ""
 
 	host = raw_input('Enter game server host IP/name: ')
 	port = int(raw_input('Enter host port: '))
@@ -165,7 +197,7 @@ if __name__ == '__main__':
 		getPasswordSaltRequest = EncodeClientRequest( [ "login.hashed" ] )
 		serverSocket.send(getPasswordSaltRequest)
 
-		getPasswordSaltResponse = serverSocket.recv(4096)
+		[getPasswordSaltResponse, receiveBuffer] = receivePacket(serverSocket, receiveBuffer)
 		printPacket(DecodePacket(getPasswordSaltResponse))
 
 		[isFromServer, isResponse, sequence, words] = DecodePacket(getPasswordSaltResponse)
@@ -189,7 +221,8 @@ if __name__ == '__main__':
 		loginRequest = EncodeClientRequest( [ "login.hashed", passwordHashHexString ] )
 		serverSocket.send(loginRequest)
 
-		loginResponse = serverSocket.recv(4096)	
+		[loginResponse, receiveBuffer] = receivePacket(serverSocket, receiveBuffer)
+
 		printPacket(DecodePacket(loginResponse))
 
 		[isFromServer, isResponse, sequence, words] = DecodePacket(loginResponse)
@@ -205,7 +238,7 @@ if __name__ == '__main__':
 		enableEventsRequest = EncodeClientRequest( [ "eventsEnabled", "true" ] )
 		serverSocket.send(enableEventsRequest)
 
-		enableEventsResponse = serverSocket.recv(4096)	
+		[enableEventsResponse, receiveBuffer] = receivePacket(serverSocket, receiveBuffer)
 		printPacket(DecodePacket(enableEventsResponse))
 
 		[isFromServer, isResponse, sequence, words] = DecodePacket(enableEventsResponse)
@@ -218,7 +251,7 @@ if __name__ == '__main__':
 
 		while True:
 			# Wait for packet from server
-			packet = serverSocket.recv(4096)	
+			[packet, receiveBuffer] = receivePacket(serverSocket, receiveBuffer)
 
 			[isFromServer, isResponse, sequence, words] = DecodePacket(packet)
 
@@ -231,7 +264,6 @@ if __name__ == '__main__':
 				print 'Received an unexpected response packet from server, ignoring:'
 
 			printPacket(DecodePacket(packet))
-
 
 	except socket.error, detail:
 		print 'Network error:', detail[1]
