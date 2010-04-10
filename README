@@ -4,20 +4,44 @@ Commands which accept a player name do automatic name filtering.  This means tha
 
 By default btps sets the server to alternate between conquest and rush maps.
 
-Config
+CONFIG
 -----------------------------------
-List admins names in config/admins.
+List admins names in config/admins...one name per line.
 Store rcon password in config/password.
 
-Current functioning commands
-!commandname <optional argument>
-Commands which accept "playername" also accept partial player names
+
+IN-GAME COMMANDS
 -----------------------------------
-!serveryell <duration_in_seconds> "message in quotes"		- Sends message to everyone on server
-!playeryell <duration_in_seconds> "playername" "message"	- Sends message to specific player
-!map														- Sends message to typer continaing mapname
-!kick "playername"											- Kicks specified player
-!kicksay "playername" "message to display to player"		- Kicks specified player and displays a message to them.
-!ban <duration_in_seconds> "playername"						- Bans specified player.  Uses PB if PB is turned on.
-!gonext														- Changes to next map in rotation.
+- 	Replace the "!" with "/" to hide the text you type from other players.
+- 	Commands which accept "playername" also accept partial player names.
+- 	Commands involving messaging don't require the message or the playername to
+	be in quotes unless the part of the playername you're typing contains a space.
+- 	Commands with optional arguments like duration can include the argument anywhere after 
+	playername.  For example the following two commands are equivalent and 
+	they tempban "player" for 600 seconds.
+		!ban player Because you're a teamkiller. d=600
+		!ban player Because you're a d=600 teamkiller.
+	The "d=600" is automatically stripped from the message text.
+-	Optional arguments:
+		"d=xx" - duration in seconds		
+
+!serversay "message"
+	-Sends chat-area text to whole server
+!playersay "player" "message"
+	-Sends chat-area text to specified player
+!serveryell "message in quotes"
+	- Sends message to everyone on server with optional duration
+	- Accepts duration argument
+!playeryell "player" "message"
+	- Sends message to specific player with optional duration
+	- Accepts duration argument
+!map
+	- Sends message to typer containing mapname
+!kick "playername" "optional message"
+	- Kicks specified player
+!ban "playername" "optional message"
+	- Kicks specfied player
+	- Accepts duration argument.  If not specified this is a permanent ban.
+!gonext
+	- Changes to next map in rotation.
 
