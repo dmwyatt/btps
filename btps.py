@@ -75,25 +75,6 @@ def log_processor():
         except:
             screen_log("ERROR LOGGING to bc2_btpslog!!!", 1)
 
-def command_processor():
-    ''' Loops waiting for commands to be in command_q and then sends them to
-        the server.
-    '''
-    global command_socket
-    global command_q
-    screen_log("Command processor thread started", 2)
-
-    while True:
-        if command_q.empty():
-            time.sleep(.1)
-            continue
-
-
-        cmd = command_q.get()
-        msg_level = cmd[2]
-        cmd = cmd[1]
-        _send_command(command_socket, cmd, msg_level)
-
 def event_logger():
     ''' Loops waiting for events to be in event_log_q and then logs them to
         mysql.
@@ -259,7 +240,7 @@ def event_logger():
 ############################################################
 #Command functions
 ############################################################
-def serversay(admin, words, skt):
+def serversay(admin, words):
     ''' Command action.
         Words should be a list formatted like:
             ["!serversay", "message"]
@@ -275,20 +256,18 @@ def serversay(admin, words, skt):
 
     _serversay(msg)
 
-def playersay(admin, words, skt):
+def playersay(admin, words):
     ''' Command action.
         Words should be a list formatted like:
             ["!playeryell", "playername", "message"]
     '''
-    global command_q
-
     if admin not in admins:
         return
 
     player = words[1]
     msg = ' '.join(words[2:])
 
-    player_name = select_player(player, get_players_names(skt), admin, skt)
+    player_name = select_player(player, get_players_names(), admin)
 
     if player_name == 1:
         return
@@ -297,7 +276,7 @@ def playersay(admin, words, skt):
     else:
         _playersay(player_name, msg)
 
-def serveryell(admin, words, skt):
+def serveryell(admin, words):
     ''' Command action.
         Words should be a list formatted like:
             ["!serveryell", "message", "words", "are", "split", "or", "not"]
@@ -327,7 +306,7 @@ def serveryell(admin, words, skt):
     _serveryell(msg, seconds)
 
 
-def playeryell(admin, words, skt):
+def playeryell(admin, words):
     ''' Command action.
         Words should be a list formatted like:
             duration included:
@@ -337,8 +316,6 @@ def playeryell(admin, words, skt):
 
         If duration isn't included we default to 4 seconds.
     '''
-    global command_q
-
     if admin not in admins:
         return
 
@@ -359,7 +336,7 @@ def playeryell(admin, words, skt):
         msg = ' '.join(words[2:])
         seconds = default_duration
 
-    player_name = select_player(player, get_players_names(skt), admin, skt)
+    player_name = select_player(player, get_players_names(), admin)
 
     if player_name == 1:
         return
@@ -375,7 +352,7 @@ def playeryell(admin, words, skt):
 
 
 
-def gonext(admin, words, skt):
+def gonext(admin, words):
     ''' Command action.
         Words should be a list formatted like:
             ["!gonext"]
@@ -384,10 +361,12 @@ def gonext(admin, words, skt):
         return
 
     cmd = 'admin.runNextLevel'
+    response = send_command(cmd)
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        _playersay(admin, "Error running next level")
 
-    command_qer(cmd, 2, prio=1)
-
-def map_(player, words, skt):
+def map_(player, words):
     ''' Command action.
         Words should be a list formatted like:
             duration included:
@@ -397,20 +376,17 @@ def map_(player, words, skt):
 
         If duration isn't included we default to 4 seconds.
     '''
-    #global command_q
-    message_duration = 8000 #ms
-    level = get_map(skt)
+    level = get_map()
 
-    cmd = 'admin.say "%s" player %s' % (level, player)
-    command_qer(cmd, 2)
+    _playersay(player, level)
 
-def kick(admin, words, skt):
+def kick(admin, words):
     if admin not in admins:
         return
 
-    _players = get_players_names(skt)
+    _players = get_players_names()
 
-    player_name = select_player(words[1], _players, admin, skt)
+    player_name = select_player(words[1], _players, admin)
 
     msg = ' '.join(words[2:])
 
@@ -419,47 +395,21 @@ def kick(admin, words, skt):
     elif player_name == 2:
         return
     else:
-        #if player_name not in admins:
-        _kick(player_name, msg = msg)
-        _playersay(admin, "ADMIN: Kicking %s." % player_name)
-        #else:
-        #    _playersay(admin, "ADMIN: Can't kick admins.")
-
-def kicksay(admin, words, skt):
-    global command_q
-
-    if admin not in admins:
-        return
-
-    _players = get_players_names(skt)
-
-    player_name = select_player(words[1], _players, admin, skt)
-
-    if player_name == 1:
-        return
-    elif player_name == 2:
-        return
-    else:
-        if player_name not in admins or player_name == 'Therms':
-            punkb_getter = action_pool.spawn(_get_var, 'vars.punkBuster', skt)
-            punkb = punkb_getter.wait()
-            if _get_var('vars.punkBuster', skt) == 'false':
-                playersay(admin, ['!playeryell', admin, 'ADMIN: !kicksay is only available when Punkbuster is enabled'], skt)
-                #playeryell(admin, ['!playeryell', admin, 'ADMIN: !kicksay is only available when Punkbuster is enabled'], skt)
-                return
-            else:
-                _pb_kick(player_name, time=1, reason = ' '.join(words[2:]))
+        if player_name not in admins:
+            _kick(player_name, msg = msg)
+            _playersay(admin, "ADMIN: Kicking %s." % player_name)
         else:
-            playersay(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
-            #playeryell(admin, ['!playeryell', admin, "ADMIN: Can't kick admins."], skt)
+            _playersay(admin, "ADMIN: Can't kick admins.")
 
-def ban(admin, words, skt):
+
+
+def ban(admin, words):
     if admin not in admins:
         return
 
-    _players = get_players_names(skt)
+    _players = get_players_names()
 
-    player_name = select_player(words[1], _players, admin, skt)
+    player_name = select_player(words[1], _players, admin)
 
     parsed = _get_variable(words, 'd')
 
@@ -475,35 +425,11 @@ def ban(admin, words, skt):
     elif player_name == 2:
         return
     else:
-        if player_name != 'cock':#in admins:
+        if player_name not in admins:
             _ban(player_name, msg=msg, duration=duration)
-            #if duration != 'perm':
-            #    cmd = 'admin.banPlayer %s seconds %i' % (player_name, duration)
-            #    command_qer(cmd, 2)
-            #else:
-            #    cmd = 'admin.banPlayer %s perm'
-            #    command_qer(cmd, 2)
         else:
             _playersay(admin, "ADMIN: Can't ban admins.")
 
-def unban(admin, words, skt):
-    global command_q
-
-    if admin not in admins:
-        return
-
-    try:
-        duration = int(words[1])
-    except:
-        duration = 0
-
-    cmd = "admin.unbanPlayer " % words[1]
-    print "COMMAND: %s" % cmd
-    command_qer(cmd, 2)
-
-    cmd = ""
-    cmd = _pb_cmd()
-    ################WORKING HERE
 
 ############################################################
 #Command helpers
@@ -531,23 +457,33 @@ def _get_variable(msg_words, variable):
 
 def _playeryell(player, msg, seconds):
     cmd = 'admin.yell "%s" %s player %s' % (msg, seconds*1000, player)
-    command_qer(cmd, 2, prio=1)
+    response = send_command(cmd)
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        return False
+    return True
 
 def _serveryell(msg, seconds):
     #Build command.  Duration is in ms
     cmd = 'admin.yell "%s" %s all' % (msg, seconds*1000)
-
-    #insert command into command queue
-    command_qer(cmd, 2, prio=1)
+    response = send_command(cmd)
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        return False
+    return True
 
 def _kick(player, msg = None):
     cmd = "admin.kickPlayer %s " % player
     if msg:
         cmd = '%s "%s"' % (cmd, msg)
 
-    _serversay("Kicking: %s" % player)
-    command_qer(cmd, 2, prio=0)
+    response = send_command(cmd)
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        return False
 
+    _serversay("Kicking: %s" % player)
+    return True
 
 def _ban(player, msg = None, duration = "perm"):
     cmd = "banList.add name %s" % player
@@ -560,55 +496,67 @@ def _ban(player, msg = None, duration = "perm"):
     if msg:
         cmd = '%s "%s"' % (cmd, msg)
 
-    _serversay(server_msg)
-    command_qer(cmd, 2, prio=0)
+    response = send_command(cmd)
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        return False
 
+    _serversay(server_msg)
+    return True
 
 def _serversay(msg):
     cmd = 'admin.say "%s", all' % msg
-    command_qer(cmd, 2, prio = 1)
+    response = send_command(cmd)
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        return False
+    return True
+
 
 def _playersay(player, msg):
     cmd = 'admin.say "%s" player %s' % (msg, player)
-    command_qer(cmd, 2, prio=1)
 
-def countdown(msg, seconds, player, skt):
+    response = send_command(cmd)
+
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        return False
+    return True
+
+
+def countdown(msg, seconds, player):
     playeryell(sys_admin, ["!playeryell", 5, "Therms", "BEGINNING COUNTDOWN"], skt)
     time.sleep(5)
     for i in reversed(range(seconds)):
         msg_mod = "%s (%i seconds)" % (msg, i)
         words = ["!playeryell", 1, player, msg_mod]
-        playeryell(sys_admin, words, skt)
+        playeryell(sys_admin, words)
         time.sleep(1)
 
-def _pb_kick(player, time = 1, reason=False):
-    cmd_text = 'PB_SV_Kick "%s" %i' % (player, time)
-
-    if reason:
-        cmd_text += " %s" % reason
-
-    cmd = _pb_cmd(cmd_text)
-    command_qer(cmd, 2)
-
-def get_map(skt, msg_level=2):
+def get_map(msg_level=2):
     level = get_level(skt, msg_level=msg_level).split("/")[1].lower()
 
     return maps.get(level, level)
 
-def get_level(skt, msg_level=2):
-    level = send_command_n_return("admin.currentLevel", msg_level, skt=skt)[1]
-    return level
+def get_level(msg_level=2):
+    response = send_command("admin.currentLevel", msg_level=msg_level)
 
-def get_players(skt):
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        return False
+
+
+    return response[1]
+
+def get_players():
     ''' '''
     #R8sample=['OK', '[CIA]', 'Therms', '24', '1', '', 'cer566', '24', '2']
     ''' R9sample=['OK', '9', 'clanTag', 'name', 'guid', 'teamId', 'squadId', 'kills', 'deaths', '
-        score', 'ping', '1', '[CIA]', 'Therms', 'EA_90A459A210EE309C3BD522C0B7F8A276', '
-        1', '0', '0', '0', '0', '0']
+        score', 'ping', '1', '[CIA]', 'Therms', '', '1', '0', '0', '0', '0', '0']
     '''
     cmd = "admin.listPlayers all"
 
-    players = send_command_n_return(cmd, 2, skt=skt)
+    players = send_command(cmd)
 
     if players[0] == 'OK' and int(players[11]) > 0:
         fields = int(players[1])
@@ -629,10 +577,10 @@ def get_players(skt):
 
     return players_output
 
-def get_clans(skt):
+def get_clans():
     ''' Returns a dict of clan: players.
     '''
-    players = get_players(skt)
+    players = get_players()
 
     #filter the list
     field_count = 0
@@ -646,22 +594,20 @@ def get_clans(skt):
 
     return clans
 
-def get_players_names(skt):
+def get_players_names():
     ''' Returns a list of player names on the server.
     '''
-    _players = get_players(skt)
+    _players = get_players()
     players = [x[1] for x in _players]
 
     return players
 
-def select_player(player, players, admin, skt):
+def select_player(player, players, admin):
     ''' Selects a player from a list of players.  Can use player name substrings.
         If substring isn't unique enough, or if no matches are found, we'll
         message the admin who initiated the command informing them of this.
     '''
     #Find player amongst players
-
-    #print "searching for %s amonst %s at %s auth" % (player, players, admin)
     matches = []
     for p in players:
         if player.lower() in p.lower():
@@ -669,13 +615,11 @@ def select_player(player, players, admin, skt):
 
     if len(matches) > 1:
         #Not specific enough
-        playersay(sys_admin, ['!playeryell', admin, 'ADMIN: Be more specific with playername.'], skt)
-        playeryell(sys_admin, ['!playeryell', admin, 'ADMIN: Be more specific with playername.'], skt)
+        _playersay(admin, 'ADMIN: Be more specific with playername.')
         return 1
     elif len(matches) == 0:
         #No matches
-        playersay(sys_admin, ['!playeryell', admin, 'ADMIN: No matching playername.'], skt)
-        #playeryell(sys_admin, ['!playeryell', admin, 'ADMIN: No matching playername.'], skt)
+        _playersay(admin, 'ADMIN: No matching playername.')
         return 2
     else:
         return matches[0]
@@ -683,37 +627,27 @@ def select_player(player, players, admin, skt):
 ############################################################
 #Connection
 ############################################################
-def db_is_online():
-    screen_log("Database availability thread started", 2)
-    cfg = _get_mysql_config()
-    db = mysql.connector.Connect(host=cfg['host'],
-                             user=cfg['user'],
-                             password=cfg['password'],
-                             database=cfg['database'])
-    while True:
-        try:
-            cursor = db.cursor()
-            cursor.execute("select version()")
-            _ = cursor.fetchall()
-        except:
-            screen_log("LOST DB CONNECTION", 0)
-            sys.exit()
+def send_command(cmd, msg_level=2):
+    global command_socket
+    global client_seq_number
 
-        time.sleep(20)
+    words = shlex.split(cmd)
+    request, client_seq_number = bc2_misc._encode_req(words, client_seq_number)
 
-def server_is_online():
-    screen_log("Server availability  thread started", 2)
-    skt = _server_connect(host, port, timeout=5)
-    _auth(skt, pw)
-    while True:
-        try:
-            _ = send_command_n_return("version", 4, skt=skt)
-        except:
-            screen_log("SERVER CONNECTION LOST", 0)
-            log_q.put("SERVER CONNECTION LOST")
-            sys.exit()
+    command_socket.send(request)
 
-        time.sleep(20)
+    screen_log("CMD SENT: %s" % cmd, msg_level)
+
+    # Wait for response from server
+    recv_buffer = ''
+    [packet, recv_buffer] = bc2_misc.recv_pkt(command_socket, recv_buffer)
+    #packet = command_socket.recv(4096)
+    _, is_response, _, words = bc2_misc._decode_pkt(packet)
+
+    if not is_response:
+        print 'Received an unexpected request packet from server, ignored:'
+
+    return words
 
 def _server_connect(host, port, timeout=None):
     ''' Connects to a server and returns the socket
@@ -771,34 +705,23 @@ def _send_command(skt, cmd, msg_level):
 def _set_receive_events(skt):
     _send_command(skt, "eventsEnabled true", 2)
 
-def send_command_n_return(cmd, msg_level, skt=None):
-    ''' Sends a command to the command queue and optionally waits for
-        a return.  This is a more expensive option than _send_command
-        since we open a new socket.
-    '''
-
-    if not skt:
-        temp_socket = _server_connect(host, port)
-        _auth(temp_socket, pw)
-        own_socket = True
-    else:
-        temp_socket = skt
-        own_socket = False
-
-    words = _send_command(temp_socket, cmd, msg_level)
-
-    if own_socket:
-        _send_command(temp_socket, "quit", msg_level)
-
-    return words
-
 ############################################################
 #Producers
 ############################################################
 def command_qer(cmd, msg_level, prio=2):
     global command_q
+    id = uuid.uuid4()
     command_q.put((prio, cmd, msg_level))
     screen_log("COMMAND QUEUED: %s" % cmd, 2)
+
+    #while True:
+    #    try:
+    #        response = thread_comm.pop(id)
+    #    except:
+    #        time.sleep(.01)
+
+
+
 
 def event_logger_qer(event, recv_time):
     ''' event should be a list of words
@@ -875,35 +798,47 @@ def find_blank_playername(cursor):
 ############################################################
 #Misc
 ############################################################
-def get_supported_maps(playlist, skt):
+def get_supported_maps(playlist):
     cmd = "admin.supportedMaps %s" % playlist.upper()
-    maps = send_command_n_return(cmd, 2, skt=skt)
-    return maps[1:]
+    response = send_command(cmd)
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        screen_log("Error running %s. Got %s" % (cmd, response))
 
-def change_playlist(playlist, skt):
+    return response[1:]
+
+def change_playlist(playlist):
     cmd = "admin.setPlaylist %s" % playlist.upper()
-    _send_command(skt, cmd, 2)
-    return
+    response = send_command(cmd)
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        screen_log("Error running %s. Got %s" % (cmd, response))
+        raise ValueError("invalid response (%s)" % response)
 
-def append_map(map, skt):
+
+def append_map(map):
     cmd = 'mapList.append "%s"' % map
-    _send_command(skt, cmd, 2)
-    return
+    response = send_command(cmd)
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        screen_log("Error running %s. Got %s" % (cmd, response))
+        raise ValueError("invalid response (%s)" % response)
 
-def clear_maplist(skt):
+def clear_maplist():
     cmd = 'mapList.clear'
-    _send_command(skt, cmd, 2)
-    return
+    response = send_command(cmd)
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        screen_log("Error running %s. Got %s" % (cmd, response))
+        raise ValueError("invalid response (%s)" % response)
 
-def change_maplist(maps, skt):
-    clear_maplist(skt)
+def change_maplist(maps):
+    clear_maplist()
     for m in maps:
-        append_map(m, skt)
+        append_map(m)
 
 def server_manager():
     global mix_conquest_rush
-    our_skt = _server_connect(host, port)
-    _auth(our_skt, pw)
     screen_log("Server manager thread started", 2)
 
     gamemodes = ['RUSH', 'CONQUEST']
@@ -914,18 +849,18 @@ def server_manager():
         gamemode_maps[gm] = {}
         gamemode_maps[gm]['maps'] = []
         gamemode_maps[gm]['last_played'] = 0
-        supported_maps = get_supported_maps(gm, our_skt)
+        supported_maps = get_supported_maps(gm)
         random.shuffle(supported_maps)
 
         gamemode_maps[gm]['maps'] = supported_maps
 
     while True:
         try:
-            curr_map = get_level(our_skt, msg_level=4)
+            curr_map = get_level(msg_level=4)
             for gm in gamemode_maps:
                 if curr_map in gamemode_maps[gm]['maps']:
                     curr_map_gamemode = gm
-            curr_gamemode_setting = send_command_n_return("admin.getPlaylist", 4, our_skt)[1]
+            curr_gamemode_setting = send_command("admin.getPlaylist", msg_level=4)[1]
 
             if mix_conquest_rush:
                 screen_log("Checking if gamemode needs switched (map: %s, map mode: %s, mode setting: %s)" % (curr_map, curr_map_gamemode, curr_gamemode_setting), 4)
@@ -939,8 +874,12 @@ def server_manager():
                     #set gamemode to a random choice from our gamemode options
                     new_gamemode = random.choice(gamemode_options)
                     screen_log("Changing gamemode type to %s" % new_gamemode, 2)
-                    change_playlist(new_gamemode, our_skt)
-                    level = send_command_n_return("admin.currentLevel", 2, skt=our_skt)[1]
+                    try:
+                        change_playlist(new_gamemode)
+                    except:
+                        raise ValueError("can't change playlist")
+
+                    level = get_level(msg_level=4)
                     gamemode_maps[curr_map_gamemode.upper()]['last_played'] = gamemode_maps[curr_map_gamemode]['maps'].index(level)
 
                     #build new maplist
@@ -950,8 +889,7 @@ def server_manager():
                     new_maplist.extend(new_gamemode_maps[:new_gamemode_lastp+1])
 
                     #send new maplist to server
-                    clear_maplist(our_skt)
-                    change_maplist(new_maplist, our_skt)
+                    change_maplist(new_maplist)
 
         except:
             screen_log("error in game mode mixer")
@@ -959,9 +897,13 @@ def server_manager():
 
         time.sleep(10)
 
-def _get_var(var, skt):
-    var = send_command_n_return(var, skt=skt)
-    return var
+def _get_var(var):
+    response = send_command(var)
+    if response[0] != 'OK':
+        log_q.put("Error running %s.  Got %s" % (cmd, response))
+        screen_log("Error running %s. Got %s" % (cmd, response))
+
+    return response[1]
 
 def screen_log(msg, level=3):
     ''' Prints messages to the console.
@@ -1097,9 +1039,6 @@ if __name__ == '__main__':
     #pool of green threads for action
     action_pool = eventlet.GreenPool()
 
-    #queue of commands to send to BC2 server
-    command_q = eventlet.queue.PriorityQueue()
-
     #event logging queue
     event_log_q = eventlet.Queue()
 
@@ -1114,7 +1053,6 @@ if __name__ == '__main__':
             "!playeryell": playeryell,
             "!map": map_,
             "!kick": kick,
-            "!kicksay": kicksay,
             "!ban": ban,
             "!gonext": gonext,
             "!playersay": playersay,
@@ -1131,15 +1069,9 @@ if __name__ == '__main__':
 
     #spawn threads
     #action_pool.spawn_n(thread_manager)
-    action_pool.spawn_n(command_processor)
     action_pool.spawn_n(event_logger)
     action_pool.spawn_n(log_processor)
     action_pool.spawn_n(server_manager)
-    #action_pool.spawn_n(db_is_online)
-    #action_pool.spawn_n(server_is_online)
-
-    #countdown("HEYHEY", 10, "Therms", command_socket)
-    #action_pool.spawn_n(countdown, "Partytime in", 10, "Therms", command_socket)
 
     event_msg_prio = 2
 
@@ -1147,7 +1079,6 @@ if __name__ == '__main__':
 
     while True:
         #get packet
-        #packet = event_socket.recv(4096)
         [packet, recv_buffer] = bc2_misc.recv_pkt(event_socket, recv_buffer)
         try:
             #decode packet
@@ -1186,4 +1117,4 @@ if __name__ == '__main__':
 
                 if potential_cmd in cmds:
                     #send command to the appropriate function
-                    cmds[potential_cmd](talker, chat_words, command_socket)
+                    cmds[potential_cmd](talker, chat_words)
