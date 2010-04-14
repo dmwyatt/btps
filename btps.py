@@ -44,10 +44,12 @@ def server_state():
 
     msg_level = 2
     try:
-        sync_state()
         si = serverinfo(msg_level=2)
         global_state['hostname'] = si['host']
         global_state['maxplayers'] = si['maxplayers']
+        global_state['active_playlist'] = si['playlist']
+        global_state['playlists'] = si['playlists']
+        sync_state()
         atime = time.time()
 
         while 1:
@@ -62,6 +64,7 @@ def server_state():
             if msg[0] == "LEVELLOAD":
                 global_state['level'] = msg[1]
                 screen_log("STATE UPDATE: level = %s" % global_state['level'], level=msg_level)
+                swap_playlists()
 
             elif msg[0] == "LEAVE":
                 try:
@@ -179,7 +182,6 @@ def event_logger():
                 db.commit()
                 screen_log("EVT_LOGGED: player.onChat - %s: %s" % (evt[1], evt[2]), 3)
             except:
-                import pdb; pdb.set_trace()
                 event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1], evt[2])
 
         elif evt[0] == 'server.onLoadingLevel':
@@ -212,7 +214,6 @@ def event_logger():
                 db.commit()
                 screen_log("EVT_LOGGED: player.onAuthenticated - %s" % evt[1], 3)
             except:
-                import pdb; pdb.set_trace()
                 event_error = "Error executing SQL: %s" % sql % (evt[2], evt[1])
 
 
@@ -230,7 +231,6 @@ def event_logger():
                 db.commit()
                 screen_log("EVT_LOGGED: player.onLeave - %s" % evt[1], 3)
             except:
-                import pdb; pdb.set_trace()
                 event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1], recv_time)
 
 
@@ -242,18 +242,15 @@ def event_logger():
                 db.commit()
                 screen_log("EVT_LOGGED: player.onKill - %s killed %s" % (evt[1], evt[2]), 3)
             except:
-                import pdb; pdb.set_trace()
                 event_error = "Error executing SQL: %s" % sql % (recv_time, evt[2], evt[1])
 
 
         elif evt[0] == 'punkBuster.onMessage':
-            #import pdb; pdb.set_trace()
             if is_pb_new_connection(evt[1]):
                 try:
                     name, ip = parse_pb_new_connection(evt[1])
                     parsed = True
                 except:
-                    import pdb; pdb.set_trace()
                     log_q.put("ERROR:  Can't parse punkbuster new connection msg (%s)." % evt[1])
                     screen_log("ERROR: Can't parse %s" % evt[1])
                     parsed = False
@@ -265,17 +262,13 @@ def event_logger():
                         db.commit()
                         screen_log(r"EVT_LOGGED: punkBuster.onMessage: %s" % evt[1], 3)
                     except:
-                        import pdb; pdb.set_trace()
                         event_error = "Error executing SQL: %s" % sql % (ip, name)
-                        print event_error
-                        import pdb; pdb.set_trace()
 
             elif is_pb_lost_connection(evt[1]):
                 try:
                     name, pb_guid = parse_pb_lost_connection(evt[1])
                     parsed = True
                 except:
-                    import pdb; pdb.set_trace()
                     log_q.put("ERROR:  Can't parse punkbuster lost connection msg (%s)." % evt[1])
                     screen_log("ERROR: Can't parse %s" % evt[1])
                     parsed = False
@@ -287,10 +280,7 @@ def event_logger():
                         db.commit()
                         screen_log(r"EVT_LOGGED: punkBuster.onMessage: %s" % evt[1], 3)
                     except:
-                        import pdb; pdb.set_trace()
                         event_error = "Error executing SQL: %s" % sql % (pb_guid, name)
-                        print event_error
-                        import pdb; pdb.set_trace()
 
             #log punkbuster messages
             sql = "INSERT INTO bc2_punkbuster (dt, punkbuster) VALUES (%s, %s)"
@@ -299,7 +289,6 @@ def event_logger():
                 db.commit()
                 screen_log(r"EVT_LOGGED: punkBuster.onMessage: %s" % evt[1], 3)
             except:
-                import pdb; pdb.set_trace()
                 event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1])
         else:
             pass
@@ -537,6 +526,8 @@ def get_friendlyfire(msg_level=2):
     return send_command(cmd, msg_level=msg_level)
 
 def serverinfo(msg_level=4):
+    ''' This function fetches rarely-changing info.
+    '''
     info = send_command("serverInfo", msg_level=msg_level)
     si = {}
     si['host'] = info[1]
@@ -545,6 +536,14 @@ def serverinfo(msg_level=4):
     si['playlist'] = info[4]
     si['level'] = info[5]
 
+    playlists = dict.fromkeys(get_playlists())
+    for playlist in playlists:
+        playlists[playlist] = {}
+        playlists[playlist]['maps'] = get_supported_maps(playlist)
+        random.shuffle(playlists[playlist]['maps'])
+        playlists[playlist]['last_played'] = 0
+        #time.sleep(.5)
+    si['playlists'] = playlists
     return si
 
 def sync_state():
@@ -552,10 +551,13 @@ def sync_state():
     level = get_level(msg_level=4)
 
     fields, players = parse_players(get_listplayers(msg_level=4))
-
     global_state['level'] = level
     global_state['players'] = players
     global_state['players_info'] = fields
+
+    for playlist in global_state['playlists']:
+        if global_state['level'] in global_state['playlists'][playlist]['maps']:
+            global_state['curr_map_playlist'] = playlist
 
 def get_listplayers(msg_level = 2):
     cmd = "admin.listPlayers all"
@@ -661,9 +663,9 @@ def countdown(msg, seconds, player):
         time.sleep(1)
 
 def get_map(msg_level=2):
-    level = get_level(msg_level=msg_level).split("/")[1].lower()
+    #level = get_level(msg_level=msg_level).split("/")[1].lower()
 
-    return maps.get(level, level)
+    return global_state['mapnames'].get(global_state['level'], global_state['level'])
 
 def get_level(msg_level=2):
     response = send_command("admin.currentLevel", msg_level=msg_level)
@@ -891,6 +893,10 @@ def parse_pb_lost_connection(pb):
 ############################################################
 #Misc
 ############################################################
+def get_playlists():
+    cmd = "admin.getPlaylists"
+    return send_command(cmd)[1:]
+
 def chat_notice(chat_words):
     words = {"ff": ff_notice,
              "friendly fire": ff_notice,
@@ -928,8 +934,8 @@ def change_playlist(playlist):
     if response[0] != 'OK':
         log_q.put("Error running %s.  Got %s" % (cmd, response))
         screen_log("Error running %s. Got %s" % (cmd, response))
-        raise ValueError("invalid response (%s)" % response)
-
+    else:
+        global_state['active_playlist'] = playlist
 
 def append_map(map):
     cmd = 'mapList.append "%s"' % map
@@ -1012,8 +1018,37 @@ def server_manager():
 
         time.sleep(10)
 
-def swap_playlists():
-    pass
+def swap_playlists(gamemodes = ['RUSH', 'CONQUEST']):
+    ''' If the active playlist is the same as the playlist of the map we're
+        currently playing, pick a new playlist from gamemodes.
+    '''
+
+    for playlist in global_state['playlists']:
+        if global_state['level'] in  global_state['playlists'][playlist]['maps']:
+            global_state['curr_map_playlist'] = playlist
+            break
+    if global_state['active_playlist'] == global_state['curr_map_playlist']:
+        playlist_options = list(gamemodes)
+
+        #remove our current playlist setting from our options
+        playlist_options.pop(playlist_options.index(global_state['active_playlist']))
+
+        #set playlist to a random choice from our playlist options
+        new_playlist = random.choice(playlist_options)
+        screen_log("Changing playlist type to %s" % new_playlist, 2)
+        change_playlist(new_playlist)
+
+        #store current map as our last played map for this playlist
+        curr_map_playlist = global_state['curr_map_playlist']
+        global_state['playlists'][curr_map_playlist]['last_played'] = \
+        global_state['playlists'][curr_map_playlist]['maps'].index(global_state['level'])
+
+        new_playlist_maps = global_state['playlists'][new_playlist]['maps']
+        new_playlist_lastplayed = global_state['playlists'][new_playlist]['last_played']
+        new_maplist = new_playlist_maps[new_playlist_lastplayed+1:]
+        new_maplist.extend(new_playlist_maps[:new_playlist_lastplayed+1])
+
+        change_maplist(new_maplist)
 
 def _get_var(var):
     response = send_command(var)
@@ -1123,6 +1158,28 @@ def create_tables():
 ############################################################
 #IRC Bot
 ############################################################
+def irc_colorize(text, color_num):
+    ctrl = "\x03"
+    t = "%s%s%s%s" % (ctrl, color_num, text, ctrl)
+    return t
+
+def irc_q(channel):
+    #colors
+    ctrl = "\x03"
+    red = 4
+    greenish = 10
+
+    host = irc_colorize(global_state['hostname'], greenish)
+    splitter = irc_colorize("|", red)
+    players = irc_colorize("%s/%s" % (len(global_state['players']), global_state['maxplayers']), greenish)
+    map = irc_colorize(get_map(), greenish)
+
+    msg = "%s %s %s %s %s" % (host, splitter, players, splitter, map)
+
+    msg = "PRIVMSG %s :%s\r\n" % (channel, msg)
+
+    return msg
+
 def irc_parsemsg(s):
     """Breaks a message from an IRC server into its prefix, command, and arguments.
     """
@@ -1199,13 +1256,11 @@ def irc_bot(host, port, nick, ident, realname, channel):
                 screen_log('PONGED: %s' % args[0])
 
             if command == "PRIVMSG":
-                if args[1] == "!q":
-
-                    msg = "%s | %s/%s | %s" % (global_state['hostname'],
-                                                    len(global_state['players']),
-                                                    global_state['maxplayers'],
-                                                    get_map())
-                    s.send(p_msg % (args[0], msg))
+                try:
+                    if args[1] == "!q":
+                        s.send(irc_q(args[0]))
+                except:
+                    import pdb; pdb.set_trace()
 
 
 
@@ -1219,7 +1274,7 @@ if __name__ == '__main__':
     ircNICK="SmackBotTest"
     ircIDENT="sbot"
     ircREALNAME="Thermsbot"
-    ircCHANNEL="#thermtest"
+    ircCHANNEL="#clan_cia"
 
     #config
     host = "68.232.176.204"
@@ -1230,25 +1285,26 @@ if __name__ == '__main__':
     sys_admin = uuid.uuid4()
     admins.append(sys_admin)
     output_level = 3
-    maps = {"mp_001": "Panama Canal (Conquest)",
-            "mp_003": "Laguna Alta (Conquest)",
-            "mp_005": "Atacama Desert (Conquest)",
-            "mp_006cq": "Arica Harbor (Conquest)",
-            "mp_007": "White Pass (Conquest)",
-            "mp_009cq": "Laguna Presa (Conquest)",
-            "mp_002": "Valparaiso (Rush)",
-            "mp_004": "Isla Inocentes (Rush)",
-            "mp_006": "Arica Harbor (Rush)",
-            "mp_008": "Nelson Bay (Rush)",
-            "mp_012gr": "Port Valdez (Squad Rush)",
-            "mp_001sr": "Panama Canal (Squad Rush)",
-            "mp_002sr": "Valparaiso (Squad Rush)",
-            "mp_005sr": "Atacama Desert (Squad Rush)",
-            "mp_012sr": "Port Valdez (Squad Rush)",
-            "mp_004sdm": "Isla Inocentes (Squad Deathmatch)",
-            "mp_006sdm": "Arica Harbor (Squad Deathmatch)",
-            "mp_007sdm": "White Pass (Squad Deathmatch)",
-            "mp_009sdm": "Laguna Presa (Squad Deathmatch)"}
+    global_state['mapnames'] = {"Levels/MP_001": "Panama Canal (Conquest)",
+                                "Levels/MP_003": "Laguna Alta (Conquest)",
+                                "Levels/MP_005": "Atacama Desert (Conquest)",
+                                "Levels/MP_006CQ": "Arica Harbor (Conquest)",
+                                "Levels/MP_007": "White Pass (Conquest)",
+                                "Levels/MP_009CQ": "Laguna Presa (Conquest)",
+                                "Levels/MP_002": "Valparaiso (Rush)",
+                                "Levels/MP_004": "Isla Inocentes (Rush)",
+                                "Levels/MP_006": "Arica Harbor (Rush)",
+                                "Levels/MP_008": "Nelson Bay (Rush)",
+                                "Levels/MP_009GR": "Laguna Presa (Rush)",
+                                "Levels/MP_012GR": "Port Valdez (Squad Rush)",
+                                "Levels/MP_001SR": "Panama Canal (Squad Rush)",
+                                "Levels/MP_002SR": "Valparaiso (Squad Rush)",
+                                "Levels/MP_005SR": "Atacama Desert (Squad Rush)",
+                                "Levels/MP_012SR": "Port Valdez (Squad Rush)",
+                                "Levels/MP_004SDM": "Isla Inocentes (Squad Deathmatch)",
+                                "Levels/MP_006SDM": "Arica Harbor (Squad Deathmatch)",
+                                "Levels/MP_007SDM": "White Pass (Squad Deathmatch)",
+                                "Levels/MP_009SDM": "Laguna Presa (Squad Deathmatch)"}
     mix_conquest_rush = True
 
     #pool of green threads for action
@@ -1288,7 +1344,7 @@ if __name__ == '__main__':
     action_pool.spawn_n(irc_bot, ircHOST, ircPORT, ircNICK, ircIDENT, ircREALNAME, ircCHANNEL)
     action_pool.spawn_n(event_logger)
     action_pool.spawn_n(log_processor)
-    action_pool.spawn_n(server_manager)
+    #action_pool.spawn_n(server_manager)
 
     event_msg_prio = 2
 
