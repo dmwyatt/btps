@@ -48,4 +48,8 @@ IN-GAME COMMANDS
 	- Accepts duration argument.  If not specified this is a permanent ban.
 !gonext
 	- Changes to next map in rotation.
+!ff <on|off>
+	- Changes friendly fire state
+	- Using the text "ff" or "friendly fire" in any chat by any player will cause
+		the server to output state of friendly fire.
 

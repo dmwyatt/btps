@@ -67,7 +67,9 @@ def server_state():
                 try:
                     global_state['players'].pop(msg[1])
                 except KeyError:
-                    screen_log("STATE UPDATE: Attempted to remove player who doesn't exist.", level=1)
+                    err = "STATE UPDATE: Attempted to remove player who doesn't exist."
+                    screen_log(err, level=1)
+                    log_q.put(err)
                 screen_log("STATE UPDATE: player left: %s" % msg[1], level=msg_level)
 
             elif msg[0] == "AUTH":
@@ -81,7 +83,9 @@ def server_state():
                     global_state['players'][msg[1]]['kills'] += 1
                     global_state['players'][msg[2]]['deaths'] += 1
                 except KeyError:
-                    screen_log("STATE UPDATE: Attempted to update kills/death for nonexistant player", level=1)
+                    err = "STATE UPDATE: Attempted to update kills/death for nonexistant player"
+                    screen_log(err, level=1)
+                    log_q.put(err)
                 screen_log("STATE UPDATE: %s killed %s" % (msg[1], msg[2]), level=msg_level)
 
             elif msg[0] == "ST_CHANGE":
@@ -89,7 +93,9 @@ def server_state():
                     global_state['players'][msg[1]]['teamId'] = msg[2]
                     global_state['players'][msg[1]]['squadId'] = msg[3]
                 except KeyError:
-                    screen_log("STATE UPDATE: Attempted to change squad/team for nonexistant player", level=1)
+                    err = "STATE UPDATE: Attempted to change squad/team for nonexistant player"
+                    screen_log(err, level=1)
+                    log_q.put(err)
                 screen_log("STATE UPDATE: %s to team %s, squad %s" % (msg[1], msg[2], msg[3]), level=msg_level)
     except:
         print "SERVER STATE TRACKING FAILURE"
@@ -116,8 +122,9 @@ def log_processor():
 
         msg = log_q.get()
         screen_log("LOGGING to bc2_btpslog: %s" % msg, 2)
-        dt = datetime.datetime.today().strftime("%m/%d/%y %H:%M:%S")
+        dt = datetime.datetime.today()#.strftime("%m/%d/%y %H:%M:%S")
         stmt_insert = "INSERT INTO bc2_btpslog (dt, message) VALUES (%s, %s)"
+
         try:
             cursor.execute(stmt_insert, (dt, msg))
             db.commit()
@@ -159,7 +166,7 @@ def event_logger():
         evt = event_log_q.get()
 
         #format time
-        recv_time = evt[1].strftime("%Y-%m-%d %H:%M:%S")
+        recv_time = evt[1]#.strftime("%Y-%m-%d %H:%M:%S")
 
         #we only care about [0] from now on
         evt = evt[0]
@@ -300,6 +307,29 @@ def event_logger():
 ############################################################
 #Command functions
 ############################################################
+def ff(admin, words):
+    ''' Command action.
+        Words should be a list formatted like:
+            ["!ff", "message"]
+    '''
+    if admin not in admins:
+        return
+
+    if len(words) < 2:
+        _playersay(admin, "Format: !ff <on|off>")
+        return
+
+    if words[1].lower() == 'on':
+        resp = friendlyfire_on()
+        if resp[0] == 'OK':
+            _playersay(admin, "Friendly fire on.")
+    elif words[1].lower() == 'off':
+        resp = friendlyfire_off()
+        if resp[0] == 'OK':
+            _playersay(admin, "Friendly fire off.")
+    else:
+        _playersay(admin, "Format: !ff on/off")
+
 def serversay(admin, words):
     ''' Command action.
         Words should be a list formatted like:
@@ -494,9 +524,19 @@ def ban(admin, words):
 ############################################################
 #Command helpers
 ############################################################
-def serverinfo(msg_level=4):
-    global global_state
+def friendlyfire_on(msg_level=2):
+    cmd = "vars.friendlyFire true"
+    return send_command(cmd, msg_level=msg_level)
 
+def friendlyfire_off(msg_level=2):
+    cmd = "vars.friendlyFire false"
+    return send_command(cmd, msg_level=msg_level)
+
+def get_friendlyfire(msg_level=2):
+    cmd = "vars.friendlyFire"
+    return send_command(cmd, msg_level=msg_level)
+
+def serverinfo(msg_level=4):
     info = send_command("serverInfo", msg_level=msg_level)
     si = {}
     si['host'] = info[1]
@@ -513,8 +553,6 @@ def sync_state():
 
     fields, players = parse_players(get_listplayers(msg_level=4))
 
-    serverinfo()
-
     global_state['level'] = level
     global_state['players'] = players
     global_state['players_info'] = fields
@@ -524,8 +562,8 @@ def get_listplayers(msg_level = 2):
     return send_command(cmd, msg_level=msg_level)
 
 def _get_variable(msg_words, variable):
-    ''' Checks list of words for variable=x and returns (msg with variable=x stripped, x)
-        or False.
+    ''' Checks list of words for variable=x and returns (msg with variable=x
+        stripped, x) or False if variable is not in msg_words.
     '''
     for i in range(len(msg_words)):
         found = False
@@ -664,6 +702,7 @@ def parse_players(players):
     for p in xrange(playercount):
         player_records.append(tuple([x[p] for x in pdata]))
 
+    #Create dict of records with playername as key
     playerlist = {}
     for i in xrange(playercount):
         _ = {}
@@ -849,40 +888,31 @@ def parse_pb_lost_connection(pb):
         return
     return name, pb_guid
 
-def event_onchat(words, recv_time):
-    global event_chat_q
-    player = words[1]
-    text = words[2]
-    stmt_insert = "INSERT INTO bc2_chat (player, text) VALUES (%s, %s)"
-
-def find_blank_playername(cursor):
-    ''' Checks each player currently on the server against our log of player
-        connections.  If the player isn't in our log, it means he is the one
-        who BC2's player.onJoin event reported a blank playername for.
-    '''
-    global command_socket
-    screen_log("Attempting to find blank player name.", 2)
-    players = get_players_names(command_socket)
-    num_tries = 3
-    for i in range(num_tries):
-        for player in players:
-            stmt_select = "SELECT * FROM bc2_connections WHERE player = '%s' AND leavetime IS NULL" % player
-            try:
-                cursor.execute(stmt_select)
-            except:
-                return 0
-            results = cursor.fetchall()
-            if len(results) == 0:
-                screen_log("Found blank playername %s" % player, 2)
-                return player
-            screen_log("%s isn't the blank playername" % player, 3)
-
-        time.sleep(1)
-
-
 ############################################################
 #Misc
 ############################################################
+def chat_notice(chat_words):
+    words = {"ff": ff_notice,
+             "friendly fire": ff_notice,
+             "ffire": ff_notice,
+             "f fire": ff_notice,
+             "friendly f": ff_notice}
+    chat_words = ' '.join(chat_words)
+
+    for word in words:
+        if word in chat_words:
+            print "%s is in %s" % (word, chat_words)
+            words[word]()
+            return
+
+def ff_notice():
+    ff = get_friendlyfire(msg_level = 2)
+    print ff
+    if ff[1].lower() == 'true':
+        _serversay("Friendly fire is on")
+    else:
+        _serversay("Friendly fire is off")
+
 def get_supported_maps(playlist):
     cmd = "admin.supportedMaps %s" % playlist.upper()
     response = send_command(cmd)
@@ -981,6 +1011,9 @@ def server_manager():
             log_q.put("error in game mode mixer")
 
         time.sleep(10)
+
+def swap_playlists():
+    pass
 
 def _get_var(var):
     response = send_command(var)
@@ -1238,7 +1271,8 @@ if __name__ == '__main__':
             "!ban": ban,
             "!gonext": gonext,
             "!playersay": playersay,
-            "!serversay": serversay}
+            "!serversay": serversay,
+            "!ff": ff}
 
     #establish connection for event stream
     event_socket = _server_connect(host, port)
@@ -1262,7 +1296,6 @@ if __name__ == '__main__':
 
     process=True
     #process=False
-
     while process:
         #get packet
         [packet, recv_buffer] = bc2_misc.recv_pkt(event_socket, recv_buffer)
@@ -1304,3 +1337,7 @@ if __name__ == '__main__':
                 if potential_cmd in cmds:
                     #send command to the appropriate function
                     cmds[potential_cmd](talker, chat_words)
+                else:
+                    #don't want to respond to server-initiated chat
+                    if talker != "Server":
+                        chat_notice(chat_words)
