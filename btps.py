@@ -17,35 +17,83 @@ from eventlet.green import socket
 from eventlet.green import time
 import mysql.connector
 
+
 ############################################################
 #Consumer loops
 ############################################################
-def thread_manager():
-    ''' If a thread is killing itself it will put a message in thread_q.  We
-        fetch that message and restart it.
+def server_state():
     '''
+        Responds to messages on state_q.
+        Messages are as follows:
+            ["ST_CHANGE", to team, to squad]
+            ["KILL", killer, victim]
+            ["AUTH", name, guid]
+            ["LEAVE", name]
+            ["LEVELLOAD", level]
 
-    global thread_q
-    screen_log("Thread manangement thread started", 2)
+        We also query the server every ~30 seconds for state information that
+        isn't exposed via server events.
 
-    thread_msgs = {"event_logger": event_logger,
-                   "test_thread": test_thread}
+        Maintains a global dict of player information.
+    '''
+    global state_q
+    global global_state
 
-    while True:
-        if thread_q.empty():
-            continue
+    sync_interval = 30
+    screen_log("Server state thread started", 2)
 
-        msg = thread_q.get()
-        screen_log("%s thread died, restarting..." % msg, 1)
-        action_pool.spawn_n(thread_msgs[msg])
+    msg_level = 2
+    try:
+        sync_state()
+        si = serverinfo(msg_level=2)
+        global_state['hostname'] = si['host']
+        global_state['maxplayers'] = si['maxplayers']
+        atime = time.time()
 
-def test_thread():
-    global thread_q
-    screen_log("Test thread started", 1)
-    time.sleep(10)
-    thread_q.put("test_thread")
-    return
+        while 1:
+            if time.time() - atime > 30:
+                sync_state()
+                atime = time.time()
+            if state_q.empty():
+                time.sleep(.1)
+                continue
+            msg = state_q.get()
 
+            if msg[0] == "LEVELLOAD":
+                global_state['level'] = msg[1]
+                screen_log("STATE UPDATE: level = %s" % global_state['level'], level=msg_level)
+
+            elif msg[0] == "LEAVE":
+                try:
+                    global_state['players'].pop(msg[1])
+                except KeyError:
+                    screen_log("STATE UPDATE: Attempted to remove player who doesn't exist.", level=1)
+                screen_log("STATE UPDATE: player left: %s" % msg[1], level=msg_level)
+
+            elif msg[0] == "AUTH":
+                sync_state()
+                screen_log("STATE UPDATE: player joined: %s" % msg[1], level=msg_level)
+                #global_state['players'][msg[1]] = dict.fromkeys(global_state['players_info'], 0)
+                #global_state['players'][msg[1]]['guid'] = msg[2]
+
+            elif msg[0] == "KILL":
+                try:
+                    global_state['players'][msg[1]]['kills'] += 1
+                    global_state['players'][msg[2]]['deaths'] += 1
+                except KeyError:
+                    screen_log("STATE UPDATE: Attempted to update kills/death for nonexistant player", level=1)
+                screen_log("STATE UPDATE: %s killed %s" % (msg[1], msg[2]), level=msg_level)
+
+            elif msg[0] == "ST_CHANGE":
+                try:
+                    global_state['players'][msg[1]]['teamId'] = msg[2]
+                    global_state['players'][msg[1]]['squadId'] = msg[3]
+                except KeyError:
+                    screen_log("STATE UPDATE: Attempted to change squad/team for nonexistant player", level=1)
+                screen_log("STATE UPDATE: %s to team %s, squad %s" % (msg[1], msg[2], msg[3]), level=msg_level)
+    except:
+        print "SERVER STATE TRACKING FAILURE"
+        import pdb; pdb.set_trace()
 
 def log_processor():
     global log_q
@@ -61,12 +109,13 @@ def log_processor():
 
     while True:
         #loop waiting for log messages
+
         if log_q.empty():
             time.sleep(.1)
             continue
 
         msg = log_q.get()
-        screen_log("LOGGING to bc2_btpslog: " % msg, 2)
+        screen_log("LOGGING to bc2_btpslog: %s" % msg, 2)
         dt = datetime.datetime.today().strftime("%m/%d/%y %H:%M:%S")
         stmt_insert = "INSERT INTO bc2_btpslog (dt, message) VALUES (%s, %s)"
         try:
@@ -126,6 +175,14 @@ def event_logger():
                 import pdb; pdb.set_trace()
                 event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1], evt[2])
 
+        elif evt[0] == 'server.onLoadingLevel':
+            state_q.put(["LEVELLOAD", evt[1]])
+
+        elif evt[0] == 'player.onSquadChange':
+            state_q.put(["ST_CHANGE", evt[1], evt[2], evt[3]])
+
+        elif evt[0] == 'player.onTeamChange':
+            state_q.put(["ST_CHANGE", evt[1], evt[2], evt[3]])
 
         elif evt[0] == 'player.onJoin':
             #Do things for when player joins server
@@ -141,6 +198,7 @@ def event_logger():
         elif evt[0] == 'player.onAuthenticated':
             #Since player.onJoin sometimes give empty playernames, we're just
             #going to start using onAuthenticated
+            state_q.put(["AUTH", evt[1], evt[2]])
             sql = "INSERT INTO bc2_connections (player, jointime, ea_guid) VALUES (%s, %s, %s)"
             try:
                 cursor.execute(sql, (evt[1], recv_time, evt[2]))
@@ -154,6 +212,7 @@ def event_logger():
         elif evt[0] == 'player.onLeave':
             #Do things for when player leaves server
             #log disconnect
+            state_q.put(["LEAVE", evt[1]])
             sql = """UPDATE bc2_connections
                                 SET leavetime=%s
                                 WHERE player=%s
@@ -169,6 +228,7 @@ def event_logger():
 
 
         elif evt[0] == 'player.onKill':
+            state_q.put(["KILL", evt[1], evt[2]])
             sql = "INSERT INTO bc2_kills (dt, victim, killer) VALUES (%s, %s, %s)"
             try:
                 cursor.execute(sql, (recv_time, evt[2], evt[1]))
@@ -434,6 +494,35 @@ def ban(admin, words):
 ############################################################
 #Command helpers
 ############################################################
+def serverinfo(msg_level=4):
+    global global_state
+
+    info = send_command("serverInfo", msg_level=msg_level)
+    si = {}
+    si['host'] = info[1]
+    si['currplayers'] = info[2]
+    si['maxplayers'] = info[3]
+    si['playlist'] = info[4]
+    si['level'] = info[5]
+
+    return si
+
+def sync_state():
+    global global_state
+    level = get_level(msg_level=4)
+
+    fields, players = parse_players(get_listplayers(msg_level=4))
+
+    serverinfo()
+
+    global_state['level'] = level
+    global_state['players'] = players
+    global_state['players_info'] = fields
+
+def get_listplayers(msg_level = 2):
+    cmd = "admin.listPlayers all"
+    return send_command(cmd, msg_level=msg_level)
+
 def _get_variable(msg_words, variable):
     ''' Checks list of words for variable=x and returns (msg with variable=x stripped, x)
         or False.
@@ -534,7 +623,7 @@ def countdown(msg, seconds, player):
         time.sleep(1)
 
 def get_map(msg_level=2):
-    level = get_level(skt, msg_level=msg_level).split("/")[1].lower()
+    level = get_level(msg_level=msg_level).split("/")[1].lower()
 
     return maps.get(level, level)
 
@@ -548,59 +637,70 @@ def get_level(msg_level=2):
 
     return response[1]
 
-def get_players():
+def parse_players(players):
     ''' '''
     #R8sample=['OK', '[CIA]', 'Therms', '24', '1', '', 'cer566', '24', '2']
     ''' R9sample=['OK', '9', 'clanTag', 'name', 'guid', 'teamId', 'squadId', 'kills', 'deaths', '
         score', 'ping', '1', '[CIA]', 'Therms', '', '1', '0', '0', '0', '0', '0']
     '''
-    cmd = "admin.listPlayers all"
+    fieldcount = int(players[1])
+    playercount = int(players[fieldcount+2])
 
-    players = send_command(cmd)
+    #get fields and their respective positions
+    _ = players[2:fieldcount+2]
+    fields = {}
+    for f in _:
+        fields[f] = _.index(f)
 
-    if players[0] == 'OK' and int(players[11]) > 0:
-        fields = int(players[1])
-        players = players[12:]
-    else:
-        raise ValueError("Couldn't get players")
+    #slice out the player data
+    data = players[fieldcount+3:]
+    pdata = []
 
-    field_count = 0
-    players_output = []
-    p =[]
-    for player in players:
-        p.append(player)
-        field_count += 1
-        if field_count == fields:
-                field_count = 0
-                players_output.append(tuple(p))
-                p = []
+    for i in xrange(fieldcount):
+        pdata.append(tuple(data[i::fieldcount]))
 
-    return players_output
+    #group each record
+    player_records = []
+    for p in xrange(playercount):
+        player_records.append(tuple([x[p] for x in pdata]))
+
+    playerlist = {}
+    for i in xrange(playercount):
+        _ = {}
+        for f in fields:
+            try:
+                value = int(player_records[i][fields[f]])
+            except:
+                value = player_records[i][fields[f]]
+            if f == 'name':
+                name = value
+                playerlist[name] = None
+
+            else:
+                _[f] = value
+        playerlist[name] = _
+
+    return fields.keys(), playerlist
 
 def get_clans():
     ''' Returns a dict of clan: players.
     '''
-    players = get_players()
+    players = global_state['players']
 
-    #filter the list
-    field_count = 0
-    players_l = []
     clans = {}
-    for player in players:
-        if player[0] in clans:
-            clans[player[0]].append(player[1])
+    for name in players:
+        clan = playerlist[name]['clanTag']
+        if clan not in clans:
+            clans[clan] = [name]
         else:
-            clans[player[0]] = [player[1]]
+            clans[clan].append(name)
 
     return clans
 
 def get_players_names():
     ''' Returns a list of player names on the server.
     '''
-    _players = get_players()
-    players = [x[1] for x in _players]
-
-    return players
+    return global_state['players'].keys()
 
 def select_player(player, players, admin):
     ''' Selects a player from a list of players.  Can use player name substrings.
@@ -708,21 +808,6 @@ def _set_receive_events(skt):
 ############################################################
 #Producers
 ############################################################
-def command_qer(cmd, msg_level, prio=2):
-    global command_q
-    id = uuid.uuid4()
-    command_q.put((prio, cmd, msg_level))
-    screen_log("COMMAND QUEUED: %s" % cmd, 2)
-
-    #while True:
-    #    try:
-    #        response = thread_comm.pop(id)
-    #    except:
-    #        time.sleep(.01)
-
-
-
-
 def event_logger_qer(event, recv_time):
     ''' event should be a list of words
     '''
@@ -1002,10 +1087,107 @@ def create_tables():
     db.commit()
     db.close()
 
+############################################################
+#IRC Bot
+############################################################
+def irc_parsemsg(s):
+    """Breaks a message from an IRC server into its prefix, command, and arguments.
+    """
+    prefix = ''
+    trailing = []
+    if not s:
+       raise ValueError("Bad IRC message.")
+    if s[0] == ':':
+        prefix, s = s[1:].split(' ', 1)
+    if s.find(' :') != -1:
+        s, trailing = s.split(' :', 1)
+        args = s.split()
+        args.append(trailing)
+    else:
+        args = s.split()
+    command = args.pop(0)
+
+    for i in xrange(len(args)):
+        args[i] = args[i].rstrip()
+
+    return prefix, command, args
+
+def irc_connect(host, port, nick, ident, realname):
+    try:
+        s = socket.socket()
+        s.connect((host, port))
+    except:
+        raise ValueError("Can't connect to %s:%s" % (host, port))
+
+    s.send("NICK %s\r\n" % nick)
+    s.send("USER %s %s bla :%s\r\n" % (ident, host, realname))
+
+    return s
+
+def irc_bot(host, port, nick, ident, realname, channel):
+
+    readbuffer=""
+    joined = False
+
+    p_msg = "PRIVMSG %s :%s\r\n"
+
+    s = irc_connect(host, port, nick, ident, realname)
+
+    screen_log("IRC bot thread started")
+    while 1:
+        try:
+            readbuffer=readbuffer+s.recv(1024)
+        except:
+            screen_log("IRC FAIL: Reconnecting in 60 seconds", level=3)
+            time.sleep(60)
+            s = irc_connect(host, port, nick, ident, realname)
+            continue
+
+        #split up our readbuffer
+        temp = readbuffer.split("\n")
+        #readbuffer should now contain everthing from last "\n" to the end
+        readbuffer=temp.pop( )
+
+        #process each irc message we've received so far
+        for line in temp:
+
+            #join our channel...some networks don't let you JOIN immediately
+            if not joined:
+                hostsplit = host.split(".")
+                for component in hostsplit:
+                    if component.lower() in line.lower():
+                        s.send("JOIN %s\r\n" % channel)
+                        joined = True
+
+            prefix, command, args = irc_parsemsg(line)
+
+            if(command=="PING"):
+                s.send("PONG %s\r\n" % args[0])
+                screen_log('PONGED: %s' % args[0])
+
+            if command == "PRIVMSG":
+                if args[1] == "!q":
+
+                    msg = "%s | %s/%s | %s" % (global_state['hostname'],
+                                                    len(global_state['players']),
+                                                    global_state['maxplayers'],
+                                                    get_map())
+                    s.send(p_msg % (args[0], msg))
+
+
 
 client_seq_number = 0
+global_state = {}
 
 if __name__ == '__main__':
+
+    ircHOST="irc.us.gamesurge.net"
+    ircPORT=6667
+    ircNICK="SmackBotTest"
+    ircIDENT="sbot"
+    ircREALNAME="Thermsbot"
+    ircCHANNEL="#thermtest"
+
     #config
     host = "68.232.176.204"
     #host="75.102.38.3"
@@ -1045,8 +1227,8 @@ if __name__ == '__main__':
     #btps log queue
     log_q = eventlet.Queue()
 
-    #thread management queue
-    thread_q = eventlet.Queue()
+    #state management queue
+    state_q = eventlet.Queue()
 
     #dictionary of commands with their functions
     cmds = {"!serveryell": serveryell,
@@ -1068,7 +1250,8 @@ if __name__ == '__main__':
     _auth(command_socket, pw)
 
     #spawn threads
-    #action_pool.spawn_n(thread_manager)
+    action_pool.spawn_n(server_state)
+    action_pool.spawn_n(irc_bot, ircHOST, ircPORT, ircNICK, ircIDENT, ircREALNAME, ircCHANNEL)
     action_pool.spawn_n(event_logger)
     action_pool.spawn_n(log_processor)
     action_pool.spawn_n(server_manager)
@@ -1077,7 +1260,10 @@ if __name__ == '__main__':
 
     recv_buffer = ''
 
-    while True:
+    process=True
+    #process=False
+
+    while process:
         #get packet
         [packet, recv_buffer] = bc2_misc.recv_pkt(event_socket, recv_buffer)
         try:
