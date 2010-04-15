@@ -36,6 +36,7 @@ def server_state():
 
         Maintains a global dict of player information.
     '''
+    global irc_qu
     global state_q
     global global_state
 
@@ -78,6 +79,8 @@ def server_state():
             elif msg[0] == "AUTH":
                 sync_state()
                 screen_log("STATE UPDATE: player joined: %s" % msg[1], level=msg_level)
+                irc_qu.put(irc_new_player(global_state['irc']['channel'], msg[1]))
+                irc_qu.put(irc_server_filling(global_state['irc']['channel']))
                 #global_state['players'][msg[1]] = dict.fromkeys(global_state['players_info'], 0)
                 #global_state['players'][msg[1]]['guid'] = msg[2]
 
@@ -1158,6 +1161,50 @@ def create_tables():
 ############################################################
 #IRC Bot
 ############################################################
+def irc_server_filling(channel):
+    level1 = 9
+    level2 = 10
+    level3 = 11
+    level4 = 12
+    failcolor = 13
+
+    players = len(global_state['players'])
+    if players == 8:
+        msg = irc_colorize("Server is starting to fill up.", level1)
+    elif players == 12:
+        msg = irc_colorize("Not kidding.  Server is filling.", level2)
+    elif players == 18:
+        msg = irc_colorize("No, really, the server has got people playing", level3)
+    elif players == 27:
+        msg = irc_colorize("Last chance to play on server, only a few slots left", level4)
+    elif players == 32:
+        msg = irc_colorize("You people fail at joining.  Server is now FULL.", failcolor)
+    else:
+        return
+
+    players = irc_colorize("(%s/%s)" % (len(global_state['players']), global_state['maxplayers']), level3)
+
+    msg = "%s %s" % (msg, players)
+    msg = "PRIVMSG %s :%s\r\n" % (channel, msg)
+
+    return msg
+
+
+def irc_new_player(channel, player):
+    #colors
+    ctrl = "\x03"
+    greenish = 10
+    red = 4
+    teal = 11
+
+    newp = irc_colorize("Player joined:", greenish)
+    player = irc_colorize(player, red)
+    players = irc_colorize("(%s/%s)" % (len(global_state['players']), global_state['maxplayers']), teal)
+    msg = "%s %s %s" % (newp, player, players)
+    msg = "PRIVMSG %s :%s\r\n" % (channel, msg)
+
+    return msg
+
 def irc_colorize(text, color_num):
     ctrl = "\x03"
     t = "%s%s%s%s" % (ctrl, color_num, text, ctrl)
@@ -1215,7 +1262,7 @@ def irc_connect(host, port, nick, ident, realname):
     return s
 
 def irc_bot(host, port, nick, ident, realname, channel):
-
+    global irc_qu
     readbuffer=""
     joined = False
 
@@ -1224,6 +1271,12 @@ def irc_bot(host, port, nick, ident, realname, channel):
     s = irc_connect(host, port, nick, ident, realname)
 
     screen_log("IRC bot thread started")
+    irc_pool = eventlet.GreenPool()
+    irc_pool.spawn_n(irc_out_processor, s)
+
+    wait_for_nicks = False
+    wait_for_end_of_nicks = False
+
     while 1:
         try:
             readbuffer=readbuffer+s.recv(1024)
@@ -1240,7 +1293,6 @@ def irc_bot(host, port, nick, ident, realname, channel):
 
         #process each irc message we've received so far
         for line in temp:
-
             #join our channel...some networks don't let you JOIN immediately
             if not joined:
                 hostsplit = host.split(".")
@@ -1250,32 +1302,66 @@ def irc_bot(host, port, nick, ident, realname, channel):
                         joined = True
 
             prefix, command, args = irc_parsemsg(line)
-
-            if(command=="PING"):
-                s.send("PONG %s\r\n" % args[0])
+            print "RAW: %s\nPREFIX: %s\nCOMMAND: %s\nARGS: %s" % (line, prefix, command, args)
+            print '-'*78
+            if command == "PING":
+                irc_qu.put("PONG %s\r\n" % args[0])
+                #s.send("PONG %s\r\n" % args[0])
                 screen_log('PONGED: %s' % args[0])
 
             if command == "PRIVMSG":
-                try:
-                    if args[1] == "!q":
-                        s.send(irc_q(args[0]))
-                except:
+                if args[1] == "!q":
+                    irc_qu.put(irc_q(args[0]))
+                if args[1] == "!bc2_gonext":
+                    user = prefix.split("!")[0]
+                    wait_for_nicks = True
+                    irc_qu.put("NAMES %s\r\n" % args[0])
+                    #gonext(sys_admin, ["!gonext"])
+
+            if wait_for_nicks:
+                if command == "353":
+                    print "STARTING NICK GATHERING"
                     import pdb; pdb.set_trace()
+                    if args[0] == global_state['irc']['nick']:
+                        if args[2] == global_state['irc']['channel']:
+                            try:
+                                users.extend(args[3].split())
+                            except:
+                                users = args[3].split()
 
+                if command == "366":
+                    if args[0] == global_state['irc']['nick']:
+                        if args[1] == global_state['irc']['channel']:
+                            wait_for_nicks = False
+                            got_nicks = True
 
+def irc_run_if_op(name, channel, func):
+    ''' Runs func if name is an op.
+    '''
+    while 1:
+        pass
+
+def irc_out_processor(s):
+    ''' irc_qu takes properly formatted (IRC) text and sends it over socket.
+    '''
+    global irc_qu
+
+    while True:
+        if irc_qu.empty():
+            time.sleep(.1)
+            continue
+        msg = irc_qu.get()
+        s.send(msg)
+
+def irc_socket_reader(s):
+    ''' Reads from a socket, does rudimentry parsing, and puts them on
+    '''
+    pass
 
 client_seq_number = 0
 global_state = {}
 
 if __name__ == '__main__':
-
-    ircHOST="irc.us.gamesurge.net"
-    ircPORT=6667
-    ircNICK="SmackBotTest"
-    ircIDENT="sbot"
-    ircREALNAME="Thermsbot"
-    ircCHANNEL="#clan_cia"
-
     #config
     host = "68.232.176.204"
     #host="75.102.38.3"
@@ -1305,6 +1391,13 @@ if __name__ == '__main__':
                                 "Levels/MP_006SDM": "Arica Harbor (Squad Deathmatch)",
                                 "Levels/MP_007SDM": "White Pass (Squad Deathmatch)",
                                 "Levels/MP_009SDM": "Laguna Presa (Squad Deathmatch)"}
+    global_state['irc'] = {"host": "irc.us.gamesurge.net",
+                           "port": 6667,
+                           "nick": "SmackBotTest",
+                           "ident": "sbot",
+                           "realname": "Thermsbot",
+                           "channel": "#thermstest"}
+
     mix_conquest_rush = True
 
     #pool of green threads for action
@@ -1318,6 +1411,9 @@ if __name__ == '__main__':
 
     #state management queue
     state_q = eventlet.Queue()
+
+    #irc out queue
+    irc_qu = eventlet.Queue()
 
     #dictionary of commands with their functions
     cmds = {"!serveryell": serveryell,
@@ -1341,7 +1437,13 @@ if __name__ == '__main__':
 
     #spawn threads
     action_pool.spawn_n(server_state)
-    action_pool.spawn_n(irc_bot, ircHOST, ircPORT, ircNICK, ircIDENT, ircREALNAME, ircCHANNEL)
+    action_pool.spawn_n(irc_bot,
+                        global_state['irc']['host'],
+                        global_state['irc']['port'],
+                        global_state['irc']['nick'],
+                        global_state['irc']['ident'],
+                        global_state['irc']['realname'],
+                        global_state['irc']['channel'])
     action_pool.spawn_n(event_logger)
     action_pool.spawn_n(log_processor)
     #action_pool.spawn_n(server_manager)
