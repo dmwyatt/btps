@@ -58,7 +58,8 @@ def server_state():
                 sync_state()
                 atime = time.time()
             if state_q.empty():
-                time.sleep(.1)
+                #time.sleep(.1)
+                eventlet.greenthread.sleep()
                 continue
             msg = state_q.get()
 
@@ -79,8 +80,8 @@ def server_state():
             elif msg[0] == "AUTH":
                 sync_state()
                 screen_log("STATE UPDATE: player joined: %s" % msg[1], level=msg_level)
-                irc_qu.put(irc_new_player(global_state['irc']['channel'], msg[1]))
-                irc_qu.put(irc_server_filling(global_state['irc']['channel']))
+                irc_out_qu.put(irc_new_player(global_state['irc']['channel'], msg[1]))
+                irc_out_qu.put(irc_server_filling(global_state['irc']['channel']))
                 #global_state['players'][msg[1]] = dict.fromkeys(global_state['players_info'], 0)
                 #global_state['players'][msg[1]]['guid'] = msg[2]
 
@@ -123,7 +124,8 @@ def log_processor():
         #loop waiting for log messages
 
         if log_q.empty():
-            time.sleep(.1)
+            #time.sleep(.1)
+            eventlet.greenthread.sleep()
             continue
 
         msg = log_q.get()
@@ -166,6 +168,7 @@ def event_logger():
         #loop waiting for events
         if event_log_q.empty():
             time.sleep(.1)
+            eventlet.greenthread.sleep()
             continue
 
         #fetch event from queue
@@ -349,11 +352,13 @@ def playersay(admin, words):
     player = words[1]
     msg = ' '.join(words[2:])
 
-    player_name = select_player(player, get_players_names(), admin)
+    player_name = select_player(player, get_players_names())
 
-    if player_name == 1:
+    if player_name[0] == 1:
+        _playersay(admin, player_name[1])
         return
-    elif player_name == 2:
+    elif player_name[0] == 2:
+        _playersay(admin, player_name[1])
         return
     else:
         _playersay(player_name, msg)
@@ -418,11 +423,13 @@ def playeryell(admin, words):
         msg = ' '.join(words[2:])
         seconds = default_duration
 
-    player_name = select_player(player, get_players_names(), admin)
+    player_name = select_player(player, get_players_names())
 
-    if player_name == 1:
+    if player_name[0] == 1:
+        _playersay(admin, player_name[1])
         return
-    elif player_name == 2:
+    elif player_name[0] == 2:
+        _playersay(admin, player_name[1])
         return
     else:
         try:
@@ -447,6 +454,9 @@ def gonext(admin, words):
     if response[0] != 'OK':
         log_q.put("Error running %s.  Got %s" % (cmd, response))
         _playersay(admin, "Error running next level")
+        return False
+    else:
+        return True
 
 def map_(player, words):
     ''' Command action.
@@ -468,13 +478,15 @@ def kick(admin, words):
 
     _players = get_players_names()
 
-    player_name = select_player(words[1], _players, admin)
+    player_name = select_player(words[1], _players)
 
     msg = ' '.join(words[2:])
 
-    if player_name == 1:
+    if player_name[0] == 1:
+        _playersay(admin, player_name[1])
         return
-    elif player_name == 2:
+    elif player_name[0] == 2:
+        _playersay(admin, player_name[1])
         return
     else:
         if player_name not in admins:
@@ -491,7 +503,7 @@ def ban(admin, words):
 
     _players = get_players_names()
 
-    player_name = select_player(words[1], _players, admin)
+    player_name = select_player(words[1], _players)
 
     parsed = _get_variable(words, 'd')
 
@@ -502,9 +514,11 @@ def ban(admin, words):
         msg = ' '.join(words[2:])
         duration = 'perm'
 
-    if player_name == 1:
+    if player_name[0] == 1:
+        _playersay(admin, player_name[1])
         return
-    elif player_name == 2:
+    elif player_name[0] == 2:
+        _playersay(admin, player_name[1])
         return
     else:
         if player_name not in admins:
@@ -746,7 +760,7 @@ def get_players_names():
     '''
     return global_state['players'].keys()
 
-def select_player(player, players, admin):
+def select_player(player, players):
     ''' Selects a player from a list of players.  Can use player name substrings.
         If substring isn't unique enough, or if no matches are found, we'll
         message the admin who initiated the command informing them of this.
@@ -759,12 +773,12 @@ def select_player(player, players, admin):
 
     if len(matches) > 1:
         #Not specific enough
-        _playersay(admin, 'ADMIN: Be more specific with playername.')
-        return 1
+        #_playersay(admin, 'ADMIN: Be more specific with playername.')
+        return (1, 'Be more specific with playername.')
     elif len(matches) == 0:
         #No matches
-        _playersay(admin, 'ADMIN: No matching playername.')
-        return 2
+        #_playersay(admin, 'ADMIN: No matching playername.')
+        return (2, 'No matching playername.')
     else:
         return matches[0]
 
@@ -1161,6 +1175,81 @@ def create_tables():
 ############################################################
 #IRC Bot
 ############################################################
+def irc_is_authed(nick):
+    if nick in global_state['irc']['authed_users']:
+        return True
+    irc_not_authed(nick)
+    return False
+def irc_auth(nick, auth_msg):
+    if len(auth_msg) != 2:
+        irc_notice("Invalid auth", nick)
+    elif auth_msg[1] == global_state['rcon_pass']:
+        try:
+            if nick not in global_state['irc']['authed_users']:
+                global_state['irc']['authed_users'].append(nick)
+        except:
+            global_state['irc']['authed_users'] = [nick]
+        irc_notice("Authed.", nick)
+    else:
+        irc_notice("Invalid auth", nick)
+
+def irc_not_authed(nick):
+    ''' Convenience function
+    '''
+    irc_notice("Command requires auth", nick)
+    irc_notice("(/msg %s AUTH rcon_password)" % global_state['irc']['nick'], nick)
+
+def irc_bc2_gonext(nick, args):
+    ''' !bc2_gonext
+            -changes to next map
+    '''
+    if irc_is_authed(nick):
+        if gonext(sys_admin, ['!gonext']):
+            irc_notice("Changed map", nick)
+        else:
+            irc_notice("Map change fail.", nick)
+
+def irc_bc2_syell(nick, args):
+    ''' !bc2_syell message to server
+            -Yells message to whole server
+    '''
+    if irc_is_authed(nick):
+        msg_parse = args[1].split()
+        if _serveryell(' '.join(msg_parse[1:]), 8):
+            irc_notice("Yelled to server", nick)
+        else:
+            irc_notice("Yell fail", nick)
+
+def irc_bc2_pyell(nick, args):
+    ''' !bc2_playeryell nick message to player
+            -Yells message to specific player
+    '''
+    if irc_is_authed(nick):
+        msg_parse = args[1].split()
+
+        yell_to = select_player(msg_parse[1], get_players_names())
+        if yell_to[0] == 1:
+            irc_notice(yell_to[1], nick)
+            return
+        elif yell_to[0] == 2:
+            irc_notice(yell_to[1], nick)
+            return
+        else:
+            if _playeryell(yell_to, ' '.join(msg_parse[2:]), 8):
+                irc_notice("Yell fail", nick)
+            else:
+                irc_notice("Yelled to %s" % yell_to)
+
+def irc_say(msg, recipient):
+    global irc_out_qu
+
+    irc_out_qu.put("PRIVMSG %s :%s\r\n" % (recipient, msg))
+
+def irc_notice(msg, recipient):
+    global irc_out_qu
+
+    irc_out_qu.put("NOTICE %s :%s\r\n" % (recipient, msg))
+
 def irc_server_filling(channel):
     level1 = 9
     level2 = 10
@@ -1197,7 +1286,7 @@ def irc_new_player(channel, player):
     red = 4
     teal = 11
 
-    newp = irc_colorize("Player joined:", greenish)
+    newp = irc_colorize("Player joined BC2 server:", greenish)
     player = irc_colorize(player, red)
     players = irc_colorize("(%s/%s)" % (len(global_state['players']), global_state['maxplayers']), teal)
     msg = "%s %s %s" % (newp, player, players)
@@ -1210,7 +1299,8 @@ def irc_colorize(text, color_num):
     t = "%s%s%s%s" % (ctrl, color_num, text, ctrl)
     return t
 
-def irc_q(channel):
+def irc_q(nick, args):
+    channel = args[0]
     #colors
     ctrl = "\x03"
     red = 4
@@ -1225,7 +1315,7 @@ def irc_q(channel):
 
     msg = "PRIVMSG %s :%s\r\n" % (channel, msg)
 
-    return msg
+    irc_out_qu.put(msg)
 
 def irc_parsemsg(s):
     """Breaks a message from an IRC server into its prefix, command, and arguments.
@@ -1262,78 +1352,123 @@ def irc_connect(host, port, nick, ident, realname):
     return s
 
 def irc_bot(host, port, nick, ident, realname, channel):
-    global irc_qu
+    global irc_out_qu
+
+    def write_irc():
+        global irc_out_qu
+        while 1:
+            if irc_out_qu.empty():
+                eventlet.greenthread.sleep()
+
+            out = irc_out_qu.get()
+            s.send(out)
+
+
     readbuffer=""
     joined = False
-
-    p_msg = "PRIVMSG %s :%s\r\n"
 
     s = irc_connect(host, port, nick, ident, realname)
 
     screen_log("IRC bot thread started")
     irc_pool = eventlet.GreenPool()
-    irc_pool.spawn_n(irc_out_processor, s)
+    irc_pool.spawn_n(write_irc)
+    global_state['irc']['authed_users'] = []
 
-    wait_for_nicks = False
-    wait_for_end_of_nicks = False
+    irc_cmds = {"!bc2_gonext": irc_bc2_gonext,
+                "!q": irc_q,
+                "!bc2_serveryell": irc_bc2_syell,
+                "!bc2_playeryell": irc_bc2_pyell}
+    try:
+        while 1:
+            try:
+                readbuffer=readbuffer+s.recv(1024)
+            except:
+                screen_log("IRC FAIL: Reconnecting in 60 seconds", level=3)
+                time.sleep(60)
+                s = irc_connect(host, port, nick, ident, realname)
+                continue
 
-    while 1:
-        try:
-            readbuffer=readbuffer+s.recv(1024)
-        except:
-            screen_log("IRC FAIL: Reconnecting in 60 seconds", level=3)
-            time.sleep(60)
-            s = irc_connect(host, port, nick, ident, realname)
-            continue
+            #split up our readbuffer
+            temp = readbuffer.split("\n")
+            #readbuffer should now contain everthing from last "\n" to the end
+            readbuffer=temp.pop( )
 
-        #split up our readbuffer
-        temp = readbuffer.split("\n")
-        #readbuffer should now contain everthing from last "\n" to the end
-        readbuffer=temp.pop( )
+            #process each irc message we've received so far
+            for line in temp:
+                #join our channel...some networks don't let you JOIN immediately
+                if not joined:
+                    hostsplit = host.split(".")
+                    for component in hostsplit:
+                        if component.lower() in line.lower():
+                            irc_out_qu.put("JOIN %s\r\n" % channel)
+                            eventlet.spawn_after(10, irc_say, "Type !q for server status", channel)
+                            joined = True
+                            break
 
-        #process each irc message we've received so far
-        for line in temp:
-            #join our channel...some networks don't let you JOIN immediately
-            if not joined:
-                hostsplit = host.split(".")
-                for component in hostsplit:
-                    if component.lower() in line.lower():
-                        s.send("JOIN %s\r\n" % channel)
-                        joined = True
+                prefix, command, args = irc_parsemsg(line)
+                if prefix:
+                    nick = prefix.split('!')[0]
+                #print "RAW: %s\nPREFIX: %s\nCOMMAND: %s\nARGS: %s" % (line, prefix, command, args)
+                #print '-'*78
 
-            prefix, command, args = irc_parsemsg(line)
-            print "RAW: %s\nPREFIX: %s\nCOMMAND: %s\nARGS: %s" % (line, prefix, command, args)
-            print '-'*78
-            if command == "PING":
-                irc_qu.put("PONG %s\r\n" % args[0])
-                #s.send("PONG %s\r\n" % args[0])
-                screen_log('PONGED: %s' % args[0])
+                if command == "PING":
+                    irc_out_qu.put("PONG %s\r\n" % args[0])
+                    #s.send("PONG %s\r\n" % args[0])
+                    screen_log('PONGED: %s' % args[0])
 
-            if command == "PRIVMSG":
-                if args[1] == "!q":
-                    irc_qu.put(irc_q(args[0]))
-                if args[1] == "!bc2_gonext":
-                    user = prefix.split("!")[0]
-                    wait_for_nicks = True
-                    irc_qu.put("NAMES %s\r\n" % args[0])
-                    #gonext(sys_admin, ["!gonext"])
-
-            if wait_for_nicks:
-                if command == "353":
-                    print "STARTING NICK GATHERING"
-                    import pdb; pdb.set_trace()
+                elif command == "PRIVMSG":
+                    msg_parse = args[1].split()
+                    #handle clients authing to bot
                     if args[0] == global_state['irc']['nick']:
-                        if args[2] == global_state['irc']['channel']:
-                            try:
-                                users.extend(args[3].split())
-                            except:
-                                users = args[3].split()
+                        if msg_parse[0].lower() == 'auth':
+                            irc_auth(nick, msg_parse)
 
-                if command == "366":
-                    if args[0] == global_state['irc']['nick']:
-                        if args[1] == global_state['irc']['channel']:
-                            wait_for_nicks = False
-                            got_nicks = True
+                    #see if we have a function to handle first word/command
+                    try:
+                        irc_cmds[msg_parse[0]](nick, args)
+                    except:
+                        pass
+
+
+                    ##these commands require being authed to bot
+                    #if nick in global_state['irc']['authed_users']:
+
+                    #    elif msg_parse[0] == "!bc2_syell":
+                    #        ''' !bc2_syell message to server
+                    #                -Yells message to whole server
+                    #        '''
+                    #        if _serveryell(' '.join(msg_parse[1:]), 8):
+                    #            import pdb; pdb.set_trace()
+                    #            irc_notice("Yelled to server", nick)
+                    #        else:
+                    #            irc_notice("Yell fail", nick)
+                    #
+                    #    elif msg_parse[0] == "!bc2_pyell":
+                    #        import pdb; pdb.set_trace()
+                    #        yell_to = select_player(msg_parse[1], get_players_names())
+                    #        if yell_to[0] == 1:
+                    #            irc_notice(yell_to[1], nick)
+                    #            return
+                    #        elif yell_to[0] == 2:
+                    #            irc_notice(yell_to[1], nick)
+                    #            return
+                    #        else:
+                    #            if _playeryell(yell_to, ' '.join(msg_parse[2:], 8)):
+                    #                irc_notice("Yell fail", nick)
+                    #            else:
+                    #                irc_notice("Yelled to %s" % yell_to)
+                    #    elif msg_parse[0] == "!bot_users":
+                    #        try:
+                    #            _users = global_state['irc']['authed_users']
+                    #        except:
+                    #            _users = None
+                    #        irc_notice("Users: %s" % _users, nick)
+
+
+
+    except:
+        print "IRC BOT FAIL"
+        import pdb; pdb.set_trace()
 
 def irc_run_if_op(name, channel, func):
     ''' Runs func if name is an op.
@@ -1348,7 +1483,8 @@ def irc_out_processor(s):
 
     while True:
         if irc_qu.empty():
-            time.sleep(.1)
+            #time.sleep(.1)
+            eventlet.greenthread.sleep(seconds=0)
             continue
         msg = irc_qu.get()
         s.send(msg)
@@ -1366,9 +1502,10 @@ if __name__ == '__main__':
     host = "68.232.176.204"
     #host="75.102.38.3"
     port = 48888
-    pw = open("config/password").read().strip()
+    global_state['rcon_pass'] = open("config/password").read().strip()
+    pw = global_state['rcon_pass']
     admins = open("config/admins").read().split("\n")
-    sys_admin = uuid.uuid4()
+    sys_admin = str(uuid.uuid4())
     admins.append(sys_admin)
     output_level = 3
     global_state['mapnames'] = {"Levels/MP_001": "Panama Canal (Conquest)",
@@ -1413,7 +1550,7 @@ if __name__ == '__main__':
     state_q = eventlet.Queue()
 
     #irc out queue
-    irc_qu = eventlet.Queue()
+    irc_out_qu = eventlet.Queue()
 
     #dictionary of commands with their functions
     cmds = {"!serveryell": serveryell,
