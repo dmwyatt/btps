@@ -6,8 +6,35 @@ By default btps sets the server to alternate between conquest and rush maps.
 
 CONFIG
 -----------------------------------
-List admins names in config/admins...one name per line.
-Store rcon password in config/password.
+	ADMINS
+	-----------------------------------
+	List admins names in config/admins...one name per line.
+	
+	RCON
+	-----------------------------------
+	Store rcon password in config/password.
+	
+	IRC
+	-----------------------------------
+	Store IRC config in config/irc.  Example:
+	
+	host: irc.us.gamesurge.net
+	port: 6667
+	nick: btps_bot
+	ident: btpsbot
+	realname: Thermsbot
+	channel: #btps_bot
+	
+	MYSQL
+	-----------------------------------
+	Store MySQL config in config/mysql.  Example:
+	
+	host: 192.168.1.2
+	user: therms
+	password: some_cool_password
+	database: gameservers
+
+
 
 
 IN-GAME COMMANDS
@@ -53,3 +80,6 @@ IN-GAME COMMANDS
 	- Using the text "ff" or "friendly fire" in any chat by any player will cause
 		the server to output state of friendly fire.
 
+IRC COMMANDS
+-----------------------------------
+Type "!botname" (set in config/irc) to get help on commands.
