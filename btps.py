@@ -4,6 +4,7 @@ eventlet.monkey_patch()
 
 import datetime
 import hashlib
+import inspect
 import os
 import random
 import re
@@ -22,8 +23,90 @@ import mysql.connector
 #Consumer loops/Threads
 ############################################################
 def thread_manager():
-    pass
-def irc_bot(host, port, nick, ident, realname, channel):
+    global thread_q
+    thread_pool = eventlet.GreenPool()
+    while 1:
+        if thread_q.empty():
+            eventlet.greenthread.sleep()
+            continue
+
+        #thread_msg = [funcname, action, thread message]
+        thread_msg = thread_q.get()
+
+        if thread_msg[1] == 'not_started':
+            screen_log("Starting %s thread" % thread_msg[0], 2)
+            thread_pool.spawn_n(threads[thread_msg[0]])
+        elif thread_msg[1] == 'dead':
+            log_m = "%s thread died (%s), restarting..." % (thread_msg[0], thread_msg[2])
+            screen_log(log_m, 1)
+            log_q.put(log_m)
+            thread_pool.spawn_n(threads[thread_msg[0]])
+        else:
+            log_m = "Received invalid thread_q message: %s" % thread_msg
+            screen_log(log_m, 1)
+            log_q.put(log_m)
+
+def receive_events():
+    global thread_q
+    global event_socket
+
+    screen_log("BC2 event receiver started", 2)
+    try:
+        recv_buffer = ''
+
+        process=True
+        #process=False
+        while process:
+            #get packet
+            [packet, recv_buffer] = bc2_misc.recv_pkt(event_socket, recv_buffer)
+            try:
+                #decode packet
+                _, is_response, sequence, words = bc2_misc._decode_pkt(packet)
+                #ack packet
+                if not is_response:
+                    response = bc2_misc._encode_resp(sequence, ["OK"])
+                    event_socket.send(response)
+            except:
+                continue
+
+            if len(words) > 0:
+                recv_time = datetime.datetime.now()
+                screen_log("EVT_RECV: %s" % words, event_msg_prio)
+
+                #send event to the event processor queue for logging
+                event_logger_qer(words, recv_time)
+
+                #check event for commands
+                if words[0] == 'player.onChat':
+                    try:
+                        chat_words = re.sub("'", "", words[2])
+                        chat_words = re.sub('"', "", chat_words)
+                        chat_words = shlex.split(chat_words)
+                    except:
+                        continue
+
+                    talker = words[1]
+                    potential_cmd = chat_words[0].lower()
+
+                    if potential_cmd[0] == "/":
+                        #bc2 hides chat text that starts with a "/" so
+                        #we'll use that as an alternate command prefix
+                        potential_cmd = "!" + potential_cmd[1:]
+
+                    if potential_cmd in cmds:
+                        #send command to the appropriate function
+                        cmds[potential_cmd](talker, chat_words)
+                    else:
+                        #don't want to respond to server-initiated chat
+                        if talker != "Server":
+                            #respond to player chat like "friendly fire"
+                            chat_notice(chat_words)
+    except:
+        thread_q.put(funcname(), 'dead', 'unknown reason')
+        return
+
+def irc_bot():
+    global thread_q
     global irc_out_qu
 
     def write_irc():
@@ -31,15 +114,20 @@ def irc_bot(host, port, nick, ident, realname, channel):
         while 1:
             if irc_out_qu.empty():
                 eventlet.greenthread.sleep()
+                continue
 
             out = irc_out_qu.get()
             s.send(out)
 
 
     readbuffer=""
-    joined = False
+    global_state['irc']['joined'] = False
 
-    s = irc_connect(host, port, nick, ident, realname)
+    s = irc_connect(global_state['irc']['host'],
+                    global_state['irc']['port'],
+                    global_state['irc']['nick'],
+                    global_state['irc']['ident'],
+                    global_state['irc']['realname'])
 
     screen_log("IRC bot thread started")
     irc_pool = eventlet.GreenPool()
@@ -61,7 +149,11 @@ def irc_bot(host, port, nick, ident, realname, channel):
             except:
                 screen_log("IRC FAIL: Reconnecting in 60 seconds", level=3)
                 time.sleep(60)
-                s = irc_connect(host, port, nick, ident, realname)
+                s = irc_connect(global_state['irc']['host'],
+                                global_state['irc']['port'],
+                                global_state['irc']['nick'],
+                                global_state['irc']['ident'],
+                                global_state['irc']['realname'])
                 continue
 
             #split up our readbuffer
@@ -72,25 +164,21 @@ def irc_bot(host, port, nick, ident, realname, channel):
             #process each irc message we've received so far
             for line in temp:
                 #join our channel...some networks don't let you JOIN immediately
-                if not joined:
-                    hostsplit = host.split(".")
-                    for component in hostsplit:
-                        if component.lower() in line.lower():
-                            irc_out_qu.put("JOIN %s\r\n" % channel)
-                            eventlet.spawn_after(10, irc_say, "Type !q for server status", channel)
-                            joined = True
-                            break
+                if irc_jointest(line):
+                    irc_out_qu.put("JOIN %s\r\n" % global_state['irc']['channel'])
+                    eventlet.spawn_after(10, irc_say, "Type '!q' for server status", global_state['irc']['channel'])
+                    eventlet.spawn_after(10, irc_say, "Type '!%s' for bot commands" % global_state['irc']['nick'], global_state['irc']['channel'])
+                    global_state['irc']['joined'] = True
 
                 prefix, command, args = irc_parsemsg(line)
                 if prefix:
                     nick = prefix.split('!')[0]
+
                 #print "RAW: %s\nPREFIX: %s\nCOMMAND: %s\nARGS: %s" % (line, prefix, command, args)
                 #print '-'*78
 
                 if command == "PING":
                     irc_out_qu.put("PONG %s\r\n" % args[0])
-                    #s.send("PONG %s\r\n" % args[0])
-                    screen_log('PONGED: %s' % args[0])
 
                 elif command == "PRIVMSG":
                     msg_parse = args[1].split()
@@ -99,12 +187,12 @@ def irc_bot(host, port, nick, ident, realname, channel):
                         if msg_parse[0].lower() == 'auth':
                             irc_auth(nick, msg_parse)
 
-                    if msg_parse[0].lower() == "!help":
+                    if msg_parse[0].lower() == "!%s" % global_state['irc']['nick'].lower():
                         if len(msg_parse) == 1:
                             for cmd in irc_cmds:
                                 irc_notice(cmd, nick)
                             irc_notice(" ", nick)
-                            irc_notice(" Type '!help <cmd>' for more info", nick)
+                            irc_notice(" Type '!%s <cmd>' for more info" % global_state['irc']['nick'], nick)
                         elif len(msg_parse) == 2:
                             try:
                                 help = irc_cmds[msg_parse[1].lower()].__doc__.split("\n")
@@ -123,8 +211,8 @@ def irc_bot(host, port, nick, ident, realname, channel):
                         pass
 
     except:
-        print "IRC BOT FAIL"
-        import pdb; pdb.set_trace()
+        thread_q.put((funcname(), 'dead', 'unknown reason'))
+        return
 
 def server_state():
     '''
@@ -143,7 +231,7 @@ def server_state():
     '''
     global irc_qu
     global state_q
-    global global_state
+    global thread_q
 
     sync_interval = 30
     screen_log("Server state thread started", 2)
@@ -210,199 +298,209 @@ def server_state():
                     log_q.put(err)
                 screen_log("STATE UPDATE: %s to team %s, squad %s" % (msg[1], msg[2], msg[3]), level=msg_level)
     except:
-        print "SERVER STATE TRACKING FAILURE"
-        import pdb; pdb.set_trace()
+        thread_q.put((funcname(), 'dead', 'unknown reason'))
+        return
 
 def log_processor():
+    global thread_q
     global log_q
     screen_log("Database logger access thread started", 2)
-    #Make sure our tables exist
-    create_tables()
-    cfg = _get_mysql_config()
-    db = mysql.connector.Connect(host=cfg['host'],
-                             user=cfg['user'],
-                             password=cfg['password'],
-                             database=cfg['database'])
-    cursor = db.cursor()
+    try:
+        #Make sure our tables exist
+        create_tables()
+        cfg = _get_mysql_config()
+        db = mysql.connector.Connect(host=cfg['host'],
+                                 user=cfg['user'],
+                                 password=cfg['password'],
+                                 database=cfg['database'])
+        cursor = db.cursor()
 
-    while True:
-        #loop waiting for log messages
+        while True:
+            #loop waiting for log messages
 
-        if log_q.empty():
-            #time.sleep(.1)
-            eventlet.greenthread.sleep()
-            continue
+            if log_q.empty():
+                #time.sleep(.1)
+                eventlet.greenthread.sleep()
+                continue
 
-        msg = log_q.get()
-        screen_log("LOGGING to bc2_btpslog: %s" % msg, 2)
-        dt = datetime.datetime.today()#.strftime("%m/%d/%y %H:%M:%S")
-        stmt_insert = "INSERT INTO bc2_btpslog (dt, message) VALUES (%s, %s)"
+            msg = log_q.get()
+            screen_log("LOGGING to bc2_btpslog: %s" % msg, 2)
+            dt = datetime.datetime.today()#.strftime("%m/%d/%y %H:%M:%S")
+            stmt_insert = "INSERT INTO bc2_btpslog (dt, message) VALUES (%s, %s)"
 
-        try:
-            cursor.execute(stmt_insert, (dt, msg))
-            db.commit()
-        except:
-            screen_log("ERROR LOGGING to bc2_btpslog!!!", 1)
+            try:
+                cursor.execute(stmt_insert, (dt, msg))
+                db.commit()
+            except:
+                screen_log("ERROR LOGGING to bc2_btpslog!!!", 1)
+    except:
+        thread_q.put((funcname(), 'dead', 'unknown reason'))
+        return
 
 def event_logger():
     ''' Loops waiting for events to be in event_log_q and then logs them to
         mysql.
     '''
     global event_log_q
+    global thread_q
     screen_log("Event logger thread started", 2)
 
-    #Make sure our tables exist
-    create_tables()
+    try:
+        #Make sure our tables exist
+        create_tables()
 
-    cfg = _get_mysql_config()
-    db = mysql.connector.Connect(host=cfg['host'],
-                             user=cfg['user'],
-                             password=cfg['password'],
-                             database=cfg['database'])
+        cfg = _get_mysql_config()
+        db = mysql.connector.Connect(host=cfg['host'],
+                                 user=cfg['user'],
+                                 password=cfg['password'],
+                                 database=cfg['database'])
 
-    cursor = db.cursor()
-    event_error = False
+        cursor = db.cursor()
+        event_error = False
 
-    while True:
-        #log any errors
-        if event_error:
-            log_q.put(event_error)
-            screen_log(event_error, 1)
-            event_error = False
+        while True:
+            #log any errors
+            if event_error:
+                log_q.put(event_error)
+                screen_log(event_error, 1)
+                event_error = False
 
-        #loop waiting for events
-        if event_log_q.empty():
-            time.sleep(.1)
-            eventlet.greenthread.sleep()
-            continue
+            #loop waiting for events
+            if event_log_q.empty():
+                time.sleep(.1)
+                eventlet.greenthread.sleep()
+                continue
 
-        #fetch event from queue
-        evt = event_log_q.get()
+            #fetch event from queue
+            evt = event_log_q.get()
 
-        #format time
-        recv_time = evt[1]#.strftime("%Y-%m-%d %H:%M:%S")
+            #format time
+            recv_time = evt[1]#.strftime("%Y-%m-%d %H:%M:%S")
 
-        #we only care about [0] from now on
-        evt = evt[0]
+            #we only care about [0] from now on
+            evt = evt[0]
 
-        if evt[0] == 'player.onChat':
-            #log chat
-            sql = "INSERT INTO bc2_chat (dt, player, chat) VALUES (%s, %s, %s)"
-            try:
-                cursor.execute(sql, (recv_time, evt[1], evt[2]))
-                db.commit()
-                screen_log("EVT_LOGGED: player.onChat - %s: %s" % (evt[1], evt[2]), 3)
-            except:
-                event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1], evt[2])
+            if evt[0] == 'player.onChat':
+                #log chat
+                sql = "INSERT INTO bc2_chat (dt, player, chat) VALUES (%s, %s, %s)"
+                try:
+                    cursor.execute(sql, (recv_time, evt[1], evt[2]))
+                    db.commit()
+                    screen_log("EVT_LOGGED: player.onChat - %s: %s" % (evt[1], evt[2]), 3)
+                except:
+                    event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1], evt[2])
 
-        elif evt[0] == 'server.onLoadingLevel':
-            state_q.put(["LEVELLOAD", evt[1]])
+            elif evt[0] == 'server.onLoadingLevel':
+                state_q.put(["LEVELLOAD", evt[1]])
 
-        elif evt[0] == 'player.onSquadChange':
-            state_q.put(["ST_CHANGE", evt[1], evt[2], evt[3]])
+            elif evt[0] == 'player.onSquadChange':
+                state_q.put(["ST_CHANGE", evt[1], evt[2], evt[3]])
 
-        elif evt[0] == 'player.onTeamChange':
-            state_q.put(["ST_CHANGE", evt[1], evt[2], evt[3]])
+            elif evt[0] == 'player.onTeamChange':
+                state_q.put(["ST_CHANGE", evt[1], evt[2], evt[3]])
 
-        elif evt[0] == 'player.onJoin':
-            #Do things for when player joins server
-            sql = "INSERT INTO bc2_connections (player, jointime) VALUES (%s, %s)"
-            if evt[1] == '':
-                event_error = "Blank player name"
-                pass
+            elif evt[0] == 'player.onJoin':
+                #Do things for when player joins server
+                sql = "INSERT INTO bc2_connections (player, jointime) VALUES (%s, %s)"
+                if evt[1] == '':
+                    event_error = "Blank player name"
+                    pass
+                else:
+                    #log new connection
+                    #screen_log("player.onJoin - %s" % evt[1], 3)
+                    pass
+
+            elif evt[0] == 'player.onAuthenticated':
+                #Since player.onJoin sometimes give empty playernames, we're just
+                #going to start using onAuthenticated
+                state_q.put(["AUTH", evt[1], evt[2]])
+                sql = "INSERT INTO bc2_connections (player, jointime, ea_guid) VALUES (%s, %s, %s)"
+                try:
+                    cursor.execute(sql, (evt[1], recv_time, evt[2]))
+                    db.commit()
+                    screen_log("EVT_LOGGED: player.onAuthenticated - %s" % evt[1], 3)
+                except:
+                    event_error = "Error executing SQL: %s" % sql % (evt[2], evt[1])
+
+
+            elif evt[0] == 'player.onLeave':
+                #Do things for when player leaves server
+                #log disconnect
+                state_q.put(["LEAVE", evt[1]])
+                sql = """UPDATE bc2_connections
+                                    SET leavetime=%s
+                                    WHERE player=%s
+                                    AND leavetime is NULL
+                                    AND %s > jointime"""
+                try:
+                    cursor.execute(sql, (recv_time, evt[1], recv_time))
+                    db.commit()
+                    screen_log("EVT_LOGGED: player.onLeave - %s" % evt[1], 3)
+                except:
+                    event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1], recv_time)
+
+
+            elif evt[0] == 'player.onKill':
+                state_q.put(["KILL", evt[1], evt[2]])
+                sql = "INSERT INTO bc2_kills (dt, victim, killer) VALUES (%s, %s, %s)"
+                try:
+                    cursor.execute(sql, (recv_time, evt[2], evt[1]))
+                    db.commit()
+                    screen_log("EVT_LOGGED: player.onKill - %s killed %s" % (evt[1], evt[2]), 3)
+                except:
+                    event_error = "Error executing SQL: %s" % sql % (recv_time, evt[2], evt[1])
+
+
+            elif evt[0] == 'punkBuster.onMessage':
+                if is_pb_new_connection(evt[1]):
+                    try:
+                        name, ip = parse_pb_new_connection(evt[1])
+                        parsed = True
+                    except:
+                        log_q.put("ERROR:  Can't parse punkbuster new connection msg (%s)." % evt[1])
+                        screen_log("ERROR: Can't parse %s" % evt[1])
+                        parsed = False
+
+                    if parsed:
+                        sql = "UPDATE bc2_connections SET ip=%s WHERE player=%s AND leavetime IS NULL"
+                        try:
+                            cursor.execute(sql, (ip, name))
+                            db.commit()
+                            screen_log(r"EVT_LOGGED: punkBuster.onMessage: %s" % evt[1], 3)
+                        except:
+                            event_error = "Error executing SQL: %s" % sql % (ip, name)
+
+                elif is_pb_lost_connection(evt[1]):
+                    try:
+                        name, pb_guid = parse_pb_lost_connection(evt[1])
+                        parsed = True
+                    except:
+                        log_q.put("ERROR:  Can't parse punkbuster lost connection msg (%s)." % evt[1])
+                        screen_log("ERROR: Can't parse %s" % evt[1])
+                        parsed = False
+
+                    if parsed:
+                        sql = "UPDATE bc2_connections SET pb_guid=%s WHERE player=%s and pb_guid IS NULL"
+                        try:
+                            cursor.execute(sql, (pb_guid, name))
+                            db.commit()
+                            screen_log(r"EVT_LOGGED: punkBuster.onMessage: %s" % evt[1], 3)
+                        except:
+                            event_error = "Error executing SQL: %s" % sql % (pb_guid, name)
+
+                #log punkbuster messages
+                sql = "INSERT INTO bc2_punkbuster (dt, punkbuster) VALUES (%s, %s)"
+                try:
+                    cursor.execute(sql, (recv_time, evt[1]))
+                    db.commit()
+                    screen_log(r"EVT_LOGGED: punkBuster.onMessage: %s" % evt[1], 3)
+                except:
+                    event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1])
             else:
-                #log new connection
-                #screen_log("player.onJoin - %s" % evt[1], 3)
                 pass
-
-        elif evt[0] == 'player.onAuthenticated':
-            #Since player.onJoin sometimes give empty playernames, we're just
-            #going to start using onAuthenticated
-            state_q.put(["AUTH", evt[1], evt[2]])
-            sql = "INSERT INTO bc2_connections (player, jointime, ea_guid) VALUES (%s, %s, %s)"
-            try:
-                cursor.execute(sql, (evt[1], recv_time, evt[2]))
-                db.commit()
-                screen_log("EVT_LOGGED: player.onAuthenticated - %s" % evt[1], 3)
-            except:
-                event_error = "Error executing SQL: %s" % sql % (evt[2], evt[1])
-
-
-        elif evt[0] == 'player.onLeave':
-            #Do things for when player leaves server
-            #log disconnect
-            state_q.put(["LEAVE", evt[1]])
-            sql = """UPDATE bc2_connections
-                                SET leavetime=%s
-                                WHERE player=%s
-                                AND leavetime is NULL
-                                AND %s > jointime"""
-            try:
-                cursor.execute(sql, (recv_time, evt[1], recv_time))
-                db.commit()
-                screen_log("EVT_LOGGED: player.onLeave - %s" % evt[1], 3)
-            except:
-                event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1], recv_time)
-
-
-        elif evt[0] == 'player.onKill':
-            state_q.put(["KILL", evt[1], evt[2]])
-            sql = "INSERT INTO bc2_kills (dt, victim, killer) VALUES (%s, %s, %s)"
-            try:
-                cursor.execute(sql, (recv_time, evt[2], evt[1]))
-                db.commit()
-                screen_log("EVT_LOGGED: player.onKill - %s killed %s" % (evt[1], evt[2]), 3)
-            except:
-                event_error = "Error executing SQL: %s" % sql % (recv_time, evt[2], evt[1])
-
-
-        elif evt[0] == 'punkBuster.onMessage':
-            if is_pb_new_connection(evt[1]):
-                try:
-                    name, ip = parse_pb_new_connection(evt[1])
-                    parsed = True
-                except:
-                    log_q.put("ERROR:  Can't parse punkbuster new connection msg (%s)." % evt[1])
-                    screen_log("ERROR: Can't parse %s" % evt[1])
-                    parsed = False
-
-                if parsed:
-                    sql = "UPDATE bc2_connections SET ip=%s WHERE player=%s AND leavetime IS NULL"
-                    try:
-                        cursor.execute(sql, (ip, name))
-                        db.commit()
-                        screen_log(r"EVT_LOGGED: punkBuster.onMessage: %s" % evt[1], 3)
-                    except:
-                        event_error = "Error executing SQL: %s" % sql % (ip, name)
-
-            elif is_pb_lost_connection(evt[1]):
-                try:
-                    name, pb_guid = parse_pb_lost_connection(evt[1])
-                    parsed = True
-                except:
-                    log_q.put("ERROR:  Can't parse punkbuster lost connection msg (%s)." % evt[1])
-                    screen_log("ERROR: Can't parse %s" % evt[1])
-                    parsed = False
-
-                if parsed:
-                    sql = "UPDATE bc2_connections SET pb_guid=%s WHERE player=%s and pb_guid IS NULL"
-                    try:
-                        cursor.execute(sql, (pb_guid, name))
-                        db.commit()
-                        screen_log(r"EVT_LOGGED: punkBuster.onMessage: %s" % evt[1], 3)
-                    except:
-                        event_error = "Error executing SQL: %s" % sql % (pb_guid, name)
-
-            #log punkbuster messages
-            sql = "INSERT INTO bc2_punkbuster (dt, punkbuster) VALUES (%s, %s)"
-            try:
-                cursor.execute(sql, (recv_time, evt[1]))
-                db.commit()
-                screen_log(r"EVT_LOGGED: punkBuster.onMessage: %s" % evt[1], 3)
-            except:
-                event_error = "Error executing SQL: %s" % sql % (recv_time, evt[1])
-        else:
-            pass
+    except:
+        thread_q.put((funcname(), 'dead', 'unknown reason'))
+        return
 
 ############################################################
 #Command functions
@@ -1015,6 +1113,10 @@ def parse_pb_lost_connection(pb):
 ############################################################
 #Misc
 ############################################################
+def funcname():
+    ''' Returns the name of the calling function
+    '''
+    return inspect.stack()[1][3]
 def get_playlists():
     cmd = "admin.getPlaylists"
     return send_command(cmd)[1:]
@@ -1081,7 +1183,6 @@ def change_maplist(maps):
         append_map(m)
 
 def server_manager():
-    global mix_conquest_rush
     screen_log("Server manager thread started", 2)
 
     gamemodes = ['RUSH', 'CONQUEST']
@@ -1105,7 +1206,7 @@ def server_manager():
                     curr_map_gamemode = gm
             curr_gamemode_setting = send_command("admin.getPlaylist", msg_level=4)[1]
 
-            if mix_conquest_rush:
+            if global_state['mix_gametypes']:
                 screen_log("Checking if gamemode needs switched (map: %s, map mode: %s, mode setting: %s)" % (curr_map, curr_map_gamemode, curr_gamemode_setting), 4)
                 #if our current gamemode is the same as the gamemode of the map we're playing, change it
                 if curr_map_gamemode.lower() == curr_gamemode_setting.lower():
@@ -1280,6 +1381,17 @@ def create_tables():
 ############################################################
 #IRC Bot
 ############################################################
+def irc_jointest(line):
+    if global_state['irc']['joined']:
+        return False
+
+    hostsplit = global_state['irc']['host'].split(".")
+    for component in hostsplit:
+        if component.lower() in line.lower():
+            return True
+    return False
+
+
 def irc_bot_users(nick, args):
     if irc_is_authed(nick):
         try:
@@ -1497,10 +1609,16 @@ def irc_connect(host, port, nick, ident, realname):
 
 
 
-
-
 client_seq_number = 0
 global_state = {}
+threads = {}
+
+threads['irc_bot'] = irc_bot
+threads['server_state'] = server_state
+threads['event_logger'] = event_logger
+threads['log_processor'] = log_processor
+threads['receive_events'] = receive_events
+
 
 if __name__ == '__main__':
     #config
@@ -1538,12 +1656,12 @@ if __name__ == '__main__':
                                 "Levels/MP_009SDM": "Laguna Presa (Squad Deathmatch)"}
     global_state['irc'] = {"host": "irc.us.gamesurge.net",
                            "port": 6667,
-                           "nick": "SmackBotTest",
+                           "nick": "SmackBot",
                            "ident": "sbot",
                            "realname": "Thermsbot",
                            "channel": "#clan_cia"}
 
-    mix_conquest_rush = True
+    global_state['mix_gametypes'] = True
 
     #pool of green threads for action
     action_pool = eventlet.GreenPool()
@@ -1559,6 +1677,9 @@ if __name__ == '__main__':
 
     #irc out queue
     irc_out_qu = eventlet.Queue()
+
+    #thread management queue
+    thread_q = eventlet.Queue()
 
     #dictionary of commands with their functions
     cmds = {"!serveryell": serveryell,
@@ -1581,66 +1702,14 @@ if __name__ == '__main__':
     _auth(command_socket, global_state['rcon_pass'])
 
     #spawn threads
-    action_pool.spawn_n(server_state)
-    action_pool.spawn_n(irc_bot,
-                        global_state['irc']['host'],
-                        global_state['irc']['port'],
-                        global_state['irc']['nick'],
-                        global_state['irc']['ident'],
-                        global_state['irc']['realname'],
-                        global_state['irc']['channel'])
-    action_pool.spawn_n(event_logger)
-    action_pool.spawn_n(log_processor)
-    #action_pool.spawn_n(server_manager)
+    thread_q.put(['server_state', 'not_started'])
+    thread_q.put(['irc_bot', 'not_started'])
+    thread_q.put(['event_logger', 'not_started'])
+    thread_q.put(['log_processor', 'not_started'])
+    thread_q.put(['receive_events', 'not_started'])
+    action_pool.spawn_n(thread_manager)
 
     event_msg_prio = 2
 
-    recv_buffer = ''
-
-    process=True
-    #process=False
-    while process:
-        #get packet
-        [packet, recv_buffer] = bc2_misc.recv_pkt(event_socket, recv_buffer)
-        try:
-            #decode packet
-            _, is_response, sequence, words = bc2_misc._decode_pkt(packet)
-            #ack packet
-            if not is_response:
-                response = bc2_misc._encode_resp(sequence, ["OK"])
-                event_socket.send(response)
-        except:
-
-            continue
-
-        if len(words) > 0:
-            recv_time = datetime.datetime.now()
-            screen_log("EVT_RECV: %s" % words, event_msg_prio)
-
-            #send event to the event processor queue for logging
-            event_logger_qer(words, recv_time)
-
-            #process event
-            if words[0] == 'player.onChat':
-                try:
-                    chat_words = re.sub("'", "", words[2])
-                    chat_words = re.sub('"', "", chat_words)
-                    chat_words = shlex.split(chat_words)
-                except:
-                    continue
-
-                talker = words[1]
-                potential_cmd = chat_words[0].lower()
-
-                if potential_cmd[0] == "/":
-                    #bc2 hides chat text that starts with a "/" so
-                    #we'll use that as an alternate command prefix
-                    potential_cmd = "!" + potential_cmd[1:]
-
-                if potential_cmd in cmds:
-                    #send command to the appropriate function
-                    cmds[potential_cmd](talker, chat_words)
-                else:
-                    #don't want to respond to server-initiated chat
-                    if talker != "Server":
-                        chat_notice(chat_words)
+    while 1:
+        eventlet.greenthread.sleep()
