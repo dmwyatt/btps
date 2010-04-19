@@ -1,3 +1,5 @@
+contact: thermopyle@contriving.net
+
 btps is designed to allow easy administration of Battlefield: Bad Company 2 servers.
 
 Commands which accept a player name do automatic name filtering.  This means that you can just type a partial name, and if it's unique it will match.
