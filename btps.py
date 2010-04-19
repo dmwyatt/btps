@@ -129,6 +129,7 @@ def irc_bot():
                     global_state['irc']['ident'],
                     global_state['irc']['realname'])
 
+
     screen_log("IRC bot thread started")
     irc_pool = eventlet.GreenPool()
     irc_pool.spawn_n(write_irc)
@@ -142,6 +143,7 @@ def irc_bot():
                 "!bc2_serversay": irc_bc2_ssay,
                 "!bc2_playersay": irc_bc2_psay
                 }
+
     try:
         while 1:
             try:
@@ -187,6 +189,7 @@ def irc_bot():
                         if msg_parse[0].lower() == 'auth':
                             irc_auth(nick, msg_parse)
 
+                    #give help on '!botname'
                     if msg_parse[0].lower() == "!%s" % global_state['irc']['nick'].lower():
                         if len(msg_parse) == 1:
                             for cmd in irc_cmds:
@@ -874,12 +877,12 @@ def _playersay(player, msg):
 
 
 def countdown(msg, seconds, player):
-    playeryell(sys_admin, ["!playeryell", 5, "Therms", "BEGINNING COUNTDOWN"], skt)
+    playeryell(global_state['sys_admin'], ["!playeryell", 5, "Therms", "BEGINNING COUNTDOWN"], skt)
     time.sleep(5)
     for i in reversed(range(seconds)):
         msg_mod = "%s (%i seconds)" % (msg, i)
         words = ["!playeryell", 1, player, msg_mod]
-        playeryell(sys_admin, words)
+        playeryell(global_state['sys_admin'], words)
         time.sleep(1)
 
 def get_map(msg_level=2):
@@ -1310,6 +1313,18 @@ def _get_mysql_config():
         cfg[split[0][:-1]] = split[1]
     return cfg
 
+def _get_irc_config():
+    config = open('config\\irc', 'r').read().split("\n")
+    global_state['irc'] = {}
+    for c in config:
+        split = shlex.split(c)
+        global_state['irc'][split[0][:-1]] = split[1]
+    for setting in global_state['irc']:
+        try:
+            global_state['irc'][setting] = int(global_state['irc'][setting])
+        except:
+            continue
+
 def create_tables():
     tables = []
     tables.append("""
@@ -1391,7 +1406,6 @@ def irc_jointest(line):
             return True
     return False
 
-
 def irc_bot_users(nick, args):
     if irc_is_authed(nick):
         try:
@@ -1429,7 +1443,8 @@ def irc_bc2_gonext(nick, args):
             -changes to next map
     '''
     if irc_is_authed(nick):
-        if gonext(sys_admin, ['!gonext']):
+
+        if gonext(global_state['sys_admin'], ['!gonext']):
             irc_notice("Changed map", nick)
         else:
             irc_notice("Map change fail.", nick)
@@ -1654,12 +1669,13 @@ if __name__ == '__main__':
                                 "Levels/MP_006SDM": "Arica Harbor (Squad Deathmatch)",
                                 "Levels/MP_007SDM": "White Pass (Squad Deathmatch)",
                                 "Levels/MP_009SDM": "Laguna Presa (Squad Deathmatch)"}
-    global_state['irc'] = {"host": "irc.us.gamesurge.net",
-                           "port": 6667,
-                           "nick": "SmackBot",
-                           "ident": "sbot",
-                           "realname": "Thermsbot",
-                           "channel": "#clan_cia"}
+    #global_state['irc'] = {"host": "irc.us.gamesurge.net",
+    #                       "port": 6667,
+    #                       "nick": "SmackBot",
+    #                       "ident": "sbot",
+    #                       "realname": "Thermsbot",
+    #                       "channel": "#clan_cia"}
+    _get_irc_config()
 
     global_state['mix_gametypes'] = True
 
